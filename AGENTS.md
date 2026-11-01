@@ -27,6 +27,9 @@ changes. Keep AGENTS.md in English; continue communicating with the user in Viet
 - `main/electrical_measurements.h`, `main/electrical_measurements.cpp`: five
   Electrical Sensor channels, delegates/AAI, Matter read checks, and electrical simulation.
 - `main/CMakeLists.txt`: application dependencies and target-derived model name.
+- `main/logger_config.h`, `main/logger_config.cpp`: persisted logger host/port and
+  console commands; no logger polling or register reads yet.
+- `scripts/configure_logger.py`: serial config transfer with commit acknowledgement.
 - `scripts/project.py`: `fw` CLI, SDK installation, build/menuconfig, serial, and flash.
 - `scripts/native_args.py`: Windows adapter for CMake-to-GN compiler flags.
 - `scripts/test_project.py`: CLI/tooling, flash manifest, quoting, and junction tests.
@@ -259,3 +262,29 @@ names assigned by users/controllers.
   5 seconds and computes ActivePower as V*I. There is no separately randomized Power
   value or aggregate total. Temperature sensors randomize temperature only. Do not
   attribute an unexpected controller value to a sum or cache without evidence.
+
+## Local logger configuration
+
+- The user supplied `192.168.5.190:502` as the default for local development/testing.
+  Keep it in ignored `config.local.json`, not firmware defaults, tracked examples,
+  CI, or public artifacts. `config.example.json` documents the generic schema.
+- `flash`, `deploy`, and `dev` automatically apply root `config.local.json` when
+  present; `--config <file>` overrides it. Without a file, preserve stored config.
+  `uv run fw config --port COM3` applies config only, without rebuilding/flashing.
+- Validate JSON before build/flash. Accept only logger.host (1..63 ASCII hostname/IPv4
+  characters) and integer logger.port (1..65535). Reject console injection/extra keys.
+- Transfer through the existing USB Matter console, not by overwriting the NVS
+  partition image. The firmware stores one versioned blob in namespace `deye_logger`,
+  commits and reads back before acknowledging a fresh request token. No partition
+  changes, pairing deletion, or Wi-Fi/fabric replacement are needed.
+- Console: `matter esp logger` shows stored configuration; the CLI sends
+  `matter esp logger set <host> <port> <8-hex-token>`. Report errors/timeouts, never
+  treat echoed input or an old acknowledgement as a successful config write.
+- Config persistence does not implement actual logger communication. Sensors remain
+  simulated. Do not infer protocol, unit ID, or register map merely from port 502.
+
+- Verified on 2026-11-01: native Windows build, 15 CLI tests, COM3 flash and
+  automatic local config application acknowledged after NVS commit/read-back.
+  After USB reset, console read still returned 192.168.5.190:502; existing Matter
+  traffic and temperature/power updates continued. Config-only USB application
+  was also checked without another flash. Actual logger communication is not tested.

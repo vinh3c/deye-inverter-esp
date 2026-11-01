@@ -21,6 +21,7 @@
 
 #include "device_identity.h"
 #include "electrical_measurements.h"
+#include "logger_config.h"
 
 namespace {
 constexpr char TAG[] = "deye_sensors";
@@ -320,6 +321,7 @@ extern "C" void app_main()
 {
     // Do not silently erase fabrics/Wi-Fi if NVS is incompatible or full.
     ESP_ERROR_CHECK(nvs_flash_init());
+    logger_config::init();
 
     esp_matter::node::config_t node_config{};
     std::strcpy(node_config.root_node.basic_information.node_label, device_identity::manufacturer);
@@ -364,6 +366,7 @@ extern "C" void app_main()
 #if CONFIG_ENABLE_CHIP_SHELL
     ESP_ERROR_CHECK(esp_matter::console::diagnostics_register_commands());
     ESP_ERROR_CHECK(esp_matter::console::factoryreset_register_commands());
+    logger_config::register_console();
     ESP_ERROR_CHECK(esp_matter::console::init());
 #endif
 

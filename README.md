@@ -154,6 +154,47 @@ in danh sách JSON để GitHub Actions tạo matrix tự động. Khi thêm tar
 thêm mapping IDF, cấu hình SDK/hardware phù hợp và xác minh firmware cho chip đó.
 Hiện chỉ có `esp32-c3` được bật; chưa mặc định hỗ trợ các chip khác.
 
+## Cấu hình Deye logger qua USB
+
+Tạo `config.local.json` theo [config.example.json](config.example.json), rồi nhập
+host và port của logger:
+
+```json
+{
+  "logger": {
+    "host": "192.168.1.100",
+    "port": 502
+  }
+}
+```
+
+`config.local.json` được gitignore, chỉ dùng cho môi trường local dev/test.
+Không nhúng địa chỉ local vào binary hoặc artifact CI. Khi file có mặt ở gốc repo,
+`flash`, `deploy`, `dev` tự ghi cấu hình sau bước flash. Khi không có file, các lệnh
+này giữ nguyên cấu hình đã lưu trên board. Có thể chỉ rõ file khác bằng `--config`:
+
+```sh
+uv run fw deploy --port COM3
+uv run fw flash --port COM3 --config config.local.json
+# Chỉ đổi cấu hình, không build/flash/reset hoặc pair lại
+uv run fw config --port COM3
+```
+
+CLI kiểm tra JSON trước khi build/flash, gửi lệnh console qua USB và chỉ báo thành
+công khi firmware commit/read-back NVS rồi trả xác nhận đúng request token.
+Nếu không nhận xác nhận, CLI báo lỗi; firmware có thể đã flash xong nhưng chưa
+xác nhận cấu hình. Board phải chạy firmware có hỗ trợ lệnh logger.
+Trên macOS/Linux, thay `COM3` bằng cổng serial tương ứng.
+
+Cấu hình được lưu thành một blob version 1 trong namespace NVS `deye_logger`,
+giữ qua reboot. Thao tác này không xóa hoặc ghi đè Wi-Fi/fabric Matter, không đổi
+partition layout. Host hỗ trợ IPv4/hostname ASCII dài 1–63 ký tự; port 1–65535.
+Xem cấu hình bằng console `matter esp logger`.
+
+**Hiện mới lưu cấu hình logger; chưa kết nối hoặc đọc thanh ghi inverter.**
+Các sensor vẫn chạy dữ liệu giả lập. Port 502 chưa đủ để xác định giao thức,
+unit ID hoặc register map của logger/inverter thực tế.
+
 ## Dev, deploy và xem log
 
 Liệt kê cổng USB rồi chọn đúng cổng của board:

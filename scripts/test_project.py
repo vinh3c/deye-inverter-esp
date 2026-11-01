@@ -8,6 +8,87 @@ from unittest.mock import patch
 
 import project
 import native_args
+import configure_logger
+
+
+class LoggerConfigTests(unittest.TestCase):
+    def test_valid_host_and_port(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            for host in ("192.168.5.190", "deye-logger.local"):
+                path.write_text(json.dumps({"logger": {"host": host, "port": 502}}))
+                self.assertEqual(project.load_logger_config(path), (host, 502))
+
+    def test_invalid_config_is_rejected_before_flash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            cases = [None, {"logger": []}, {"logger": {"host": "x"}},
+                     {"logger": {"host": "x", "port": 502}, "wifi": {} }]
+            for host, port in (("http://logger", 502), ("x\r\nmatter esp factoryreset", 502),
+                               ("a" * 64, 502), ("", 502), ("x", True), ("x", 0),
+                               ("x", 65536), ("x", "502")):
+                cases.append({"logger": {"host": host, "port": port}})
+            for data in cases:
+                path.write_text(json.dumps(data))
+                with self.subTest(data=data), patch.object(project, "flash") as flash:
+                    with patch("sys.argv", ["fw", "flash", "--port", "COM99", "--config", str(path)]):
+                        with self.assertRaises(ValueError):
+                            project.main()
+                    flash.assert_not_called()
+
+    def test_serial_ack_requires_fresh_token_and_complete_line(self):
+        from unittest.mock import Mock
+        port = Mock()
+        port.read.side_effect = [
+            b"matter esp logger set logger.local 502 12345678\r\n",
+            b"LOGGER_CONFIG_SAVED token=aaaaaaaa host=logger.local port=502\r\n",
+            b"LOGGER_CONFIG_SAVED token=12345678 host=logger.local port=502",
+            b"\r\n",
+        ]
+        ticks = iter(range(100))
+        with patch.object(configure_logger.time, "monotonic", side_effect=lambda: next(ticks)):
+            configure_logger.apply_config(port, "logger.local", 502, token="12345678")
+        self.assertEqual(port.read.call_count, 4)
+        port.write.assert_called_with(b"matter esp logger set logger.local 502 12345678\r\n")
+
+    def test_flash_applies_local_config_only_when_present(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for present in (False, True):
+                if present:
+                    (root / "config.local.json").write_text(json.dumps({
+                        "logger": {"host": "192.168.5.190", "port": 502}}))
+                with self.subTest(present=present), patch.object(project, "ROOT", root), \
+                        patch.object(project, "flash") as flash, \
+                        patch.object(project, "configure_logger") as configure, \
+                        patch("sys.argv", ["fw", "flash", "--port", "COM99"]):
+                    project.main()
+                    flash.assert_called_once()
+                    if present:
+                        configure.assert_called_once_with("COM99", ("192.168.5.190", 502))
+                    else:
+                        configure.assert_not_called()
+
+    def test_config_only_skips_build_and_flash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(json.dumps({"logger": {"host": "logger.local", "port": 1502}}))
+            with patch.object(project, "flash") as flash, patch.object(project, "idf") as idf, \
+                    patch.object(project, "configure_logger") as configure, \
+                    patch("sys.argv", ["fw", "config", "--port", "COM99", "--config", str(path)]):
+                project.main()
+                flash.assert_not_called()
+                idf.assert_not_called()
+                configure.assert_called_once_with("COM99", ("logger.local", 1502))
+
+    def test_missing_ack_is_a_failure(self):
+        from unittest.mock import Mock
+        port = Mock()
+        port.read.return_value = b"Error: unknown command\n"
+        ticks = iter(range(100))
+        with patch.object(configure_logger.time, "monotonic", side_effect=lambda: next(ticks)):
+            with self.assertRaisesRegex(RuntimeError, "No config commit acknowledgement"):
+                configure_logger.apply_config(port, "logger.local", 502, timeout=10)
 
 
 class CompileFlagsTests(unittest.TestCase):

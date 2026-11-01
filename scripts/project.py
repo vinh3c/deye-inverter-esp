@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -236,18 +237,51 @@ def flash(build_dir, port, baud, target=DEFAULT_TARGET):
     serial_command("esptool", args)
 
 
+def load_logger_config(path):
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(data, dict) or set(data) != {"logger"}:
+        raise ValueError("Config must contain only a logger object")
+    logger = data["logger"]
+    if not isinstance(logger, dict) or set(logger) != {"host", "port"}:
+        raise ValueError("logger must contain host and port")
+    host, port = logger["host"], logger["port"]
+    if not isinstance(host, str) or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,61}[A-Za-z0-9])?", host):
+        raise ValueError("logger.host must be an IPv4 address or hostname (1..63 ASCII characters); no URL or spaces")
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise ValueError("logger.port must be an integer from 1 to 65535")
+    return host, port
+
+
+def configure_logger(port, settings):
+    host, logger_port = settings
+    run(["uv", "run", "--isolated", "--no-project", "--python", "3.11",
+         "--with", "pyserial==3.5", "python", ROOT / "scripts/configure_logger.py",
+         "--port", port, "--host", host, "--logger-port", str(logger_port)])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["targets", "test", "bootstrap", "build", "menuconfig", "clean", "ports", "flash", "deploy", "monitor", "dev", "erase-flash"])
+    parser.add_argument("command", choices=["targets", "test", "bootstrap", "build", "menuconfig", "clean", "ports", "flash", "deploy", "monitor", "dev", "config", "erase-flash"])
     parser.add_argument("--target", choices=TARGETS, default=DEFAULT_TARGET)
     parser.add_argument("--build-dir", type=Path)
     parser.add_argument("--port", help="COM3, /dev/cu.usbmodem*, or /dev/ttyACM0")
     parser.add_argument("--baud", type=int, default=460800, help="flash baud rate (monitor uses 115200)")
+    parser.add_argument("--config", type=Path, help="logger JSON for flash/deploy/dev/config; defaults to config.local.json if present")
     args = parser.parse_args()
     if sys.version_info[:2] != (3, 11):
         parser.error("Use Python 3.11: uv run fw " + args.command)
-    if args.command in ("flash", "deploy", "monitor", "dev", "erase-flash") and not args.port:
+    if args.command in ("flash", "deploy", "monitor", "dev", "config", "erase-flash") and not args.port:
         parser.error("--port is required; use the ports command to list devices")
+    config_commands = ("flash", "deploy", "dev", "config")
+    if args.config and args.command not in config_commands:
+        parser.error("--config is only supported by flash/deploy/dev/config")
+    settings = None
+    if args.command in config_commands:
+        config_path = args.config or ROOT / "config.local.json"
+        if args.config or config_path.is_file():
+            settings = load_logger_config(config_path.expanduser().resolve())
+        elif args.command == "config":
+            parser.error("Provide --config or create config.local.json from config.example.json")
     build_dir = (args.build_dir or (ROOT / "build" / args.target / BUILD.name)).expanduser().resolve()
     if args.command == "targets":
         print(json.dumps(list(TARGETS)))
@@ -259,11 +293,15 @@ def main():
         serial_command("serial.tools.list_ports", ["-v"])
     elif args.command == "erase-flash":
         serial_command("esptool", ["--chip", TARGETS[args.target]["idf_target"], "--port", args.port, "erase_flash"])
+    elif args.command == "config":
+        configure_logger(args.port, settings)
     else:
         if args.command in ("build", "deploy", "dev", "menuconfig", "clean"):
             idf({"menuconfig": "menuconfig", "clean": "clean"}.get(args.command, "build"), build_dir, args.target)
         if args.command in ("flash", "deploy", "dev"):
             flash(build_dir, args.port, args.baud, args.target)
+            if settings:
+                configure_logger(args.port, settings)
         if args.command in ("monitor", "dev"):
             serial_command("serial.tools.miniterm", [args.port, "115200"])
 
