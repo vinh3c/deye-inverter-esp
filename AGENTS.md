@@ -7,8 +7,9 @@ changes. Keep AGENTS.md in English; continue communicating with the user in Viet
 
 ## Goals and collaboration
 
-- This is ESP-Matter firmware for the Deye inverter project. It currently simulates
-  sensors for testing Matter controllers; it does not read a real inverter or sensors.
+- This is ESP-Matter firmware for the Deye inverter project. It exposes
+  sensors from a real inverter over read-only Modbus TCP. The original random simulator
+  has been replaced; never silently substitute simulated values for failed reads.
 - Communicate concisely in Vietnamese. Report build/flash results and what remains
   unverified. Complete authorized work without asking again about settled decisions.
 - Prefer native Windows, macOS, and Linux workflows. Do not move the main workflow
@@ -20,23 +21,28 @@ changes. Keep AGENTS.md in English; continue communicating with the user in Viet
 
 ## Code map
 
-- `main/app_main.cpp`: bridge/endpoints, simulator, attribute/event updates,
+- `main/app_main.cpp`: bridge/endpoints, live snapshot publication, attribute/event updates,
   pairing lifecycle, topology validation, and console.
 - `main/device_identity.h`, `main/device_identity.cpp`: manufacturer/model/serial
   and the root device identity provider.
 - `main/electrical_measurements.h`, `main/electrical_measurements.cpp`: five
-  Electrical Sensor channels, delegates/AAI, Matter read checks, and electrical simulation.
+  Electrical Sensor channels, delegates/AAI, Matter read checks, and live electrical values.
 - `main/CMakeLists.txt`: application dependencies and target-derived model name.
 - `main/logger_config.h`, `main/logger_config.cpp`: persisted logger host/port and
-  console commands; no logger polling or register reads yet.
+  console commands; read by the Modbus worker each cycle.
 - `scripts/configure_logger.py`: serial config transfer with commit acknowledgement.
+- `main/inverter_data.cpp`, `.h`, `main/modbus_protocol.h`: network worker, snapshots,
+  portable decoding and Modbus framing.
+- `profiles/deye-single.json`, `scripts/generate_registers.py`: shared CLI/firmware map.
+- `scripts/modbus.py`, `scripts/test_modbus.py`, `scripts/modbus_core_test.cpp`:
+  read-only local CLI, fake logger tests, and native C++ decoder/protocol checks.
 - `scripts/project.py`: `fw` CLI, SDK installation, build/menuconfig, serial, and flash.
 - `scripts/native_args.py`: Windows adapter for CMake-to-GN compiler flags.
 - `scripts/test_project.py`: CLI/tooling, flash manifest, quoting, and junction tests.
 - `targets.json`: shared target list for the CLI and GitHub Actions matrix.
 - `sdkconfig.defaults`, `partitions.csv`: default configuration and flash layout.
 - `.github/workflows/build.yml`: native CI and artifacts named after targets.
-- `README.md`: user instructions, pairing, simulation, and verification status.
+- `README.md`: user instructions, pairing, live Modbus diagnostics, and verification status.
 
 ## Build, development, and flash
 
@@ -88,10 +94,10 @@ One Root Node, one aggregator/bridge, and these child devices:
 | --- | --- | --- |
 | 0 | Root Node | Basic Information, commissioning |
 | 1 | Aggregator | Groups child devices |
-| 2 | AC Temperature | Temperature Sensor; initially 32 °C, range 25–55 °C |
-| 3 | DC Temperature | Temperature Sensor; initially 36 °C, range 30–65 °C |
-| 4 | Battery Temperature | Temperature Sensor; initially 28 °C, range 20–45 °C |
-| 5 | Grid | Contact Sensor; initially CLOSED |
+| 2 | AC Temperature | Temperature Sensor; register 91 |
+| 3 | DC Temperature | Temperature Sensor; register 90 |
+| 4 | Battery Temperature | Temperature Sensor; register 182 |
+| 5 | Grid | Contact Sensor; register 150 voltage presence with hysteresis |
 | 7 | PV1 Power | DC Electrical Sensor; Voltage, ActiveCurrent, ActivePower |
 | 8 | PV2 Power | DC Electrical Sensor; Voltage, ActiveCurrent, ActivePower |
 | 9 | Grid Power | AC Electrical Sensor; Voltage, ActiveCurrent, ActivePower |
@@ -110,10 +116,11 @@ names assigned by users/controllers.
   that can truncate to the same value.
 - Each child has Bridged Device Basic Information, the aggregator as its parent,
   and its own NodeLabel, UniqueID, and metadata.
-- Simulation updates every **5 seconds**. Temperatures change by at most ±0.50 °C
-  per update and stay within their ranges. Matter uses `nullable<int16_t>` in 0.01 °C.
-- Grid randomly chooses OPEN/CLOSED: `StateValue=true` means CLOSED; `false` means OPEN.
-  Update the Boolean State attribute and emit `StateChange` only when the state changes.
+- Publish each completed Modbus cycle, then wait **5 seconds** before the next cycle.
+  Matter temperatures use nullable int16 in 0.01 °C, decoded as (raw-1000)*10.
+- Grid uses voltage presence hysteresis: become CLOSED at >=100 V, remain CLOSED
+  at >=80 V. true=CLOSED, false=OPEN. Emit StateChange only on a real state change.
+  Read errors mark it unreachable and retain its state, never fabricate an outage.
 - **Power Source / battery percentage was removed at the user's request**:
   the user tested the Battery endpoint in Apple Home/HomeKit and reported it as
   unsupported (2026-11-01). Defer storage battery monitoring. Do not restore it
@@ -131,16 +138,13 @@ names assigned by users/controllers.
 - Electrical Sensor device type 0x0510 uses PowerTopology TreeTopology and EPM 0x0090.
   Enable only DirectCurrent for PV1/PV2/Battery and only AlternatingCurrent for
   Grid/Load. Avoid the SDK convenience helper that enables both AC and DC on every channel.
-- Matter units: mV/mA/mW, nullable int64. Log V/A/W. Simulated ranges: PV 250–450 V,
-  0–12 A; Grid 220–240 V, ±10 A; Battery 48–56 V, ±30 A; Load 220–240 V, 0–20 A.
-  These profiles do not describe real inverter/BMS hardware.
-- Update bounded values every 5 seconds. Grid OPEN sets Grid Power to 0 V/A/W.
-  Positive Grid means import, negative means export; positive Battery means discharge,
-  negative means charge. P=V×I, with PF=1 for Grid/Load.
-  Load represents inverter output and remains supplied in the simulation when Grid
-  is OPEN. Only Grid Power depends on the contact; do not infer grid_dependent from AC mode.
-- The delegate provides PowerMode, three MeasurementTypes, and Accuracy for synthetic
-  data (`measured=false`). Do not claim actual hardware measurement accuracy.
+- Matter units: nullable int64 mV/mA/mW; log V/A/W. Read inverter-reported watts
+  directly. Do not compute active AC power as V*I, force zeros from Grid contact,
+  clamp real measurements to old simulation ranges, or aggregate unrelated channels.
+- The delegate provides PowerMode, three MeasurementTypes, and Accuracy with
+  measured=true. Since calibrated tolerance is unknown, use conservative full-span
+  register bounds, not invented precision. Partial failures preserve independent
+  attributes, set missing values null, and mark incomplete sensors unreachable.
 - Retain a separate Instance/Delegate per endpoint and register after `esp_matter::start`
   under the ChipStack lock. The SDK default callback uses optional mask 0, rejecting
   Voltage/ActiveCurrent even when their attributes exist. Retain the correct mask.
@@ -194,7 +198,8 @@ names assigned by users/controllers.
   `deye-inverter-esp`, model `esp32-c3`.
 - All five Electrical Sensors at 7/8/9/10/11 were built/flashed and passed on-board
   AAI Read + TLV encoding checks for all three quantities and required metadata.
-  Logs confirm units, ranges, and P=V×I. This does not verify Apple Home UI behavior.
+  Those earlier simulator logs confirmed units and P=V*I only. Live Modbus uses
+  register-reported watts instead; see the live verification below.
 - Distinguish build success, flash success, runtime checks, and controller UI verification.
   Old Power Source logs do not prove Apple Home percentage support. Do not claim
   macOS/Linux jobs passed without corresponding CI results.
@@ -258,10 +263,9 @@ names assigned by users/controllers.
   with empty PartsLists and no EPM/PowerTopology on temperature endpoints. Preserve
   startup checks when adding channels or changing endpoint composition. Descriptor
   TreeComposition alone does not constrain the scope of electrical measurements.
-- Simulation randomizes Voltage and ActiveCurrent per electrical channel every
-  5 seconds and computes ActivePower as V*I. There is no separately randomized Power
-  value or aggregate total. Temperature sensors randomize temperature only. Do not
-  attribute an unexpected controller value to a sum or cache without evidence.
+- The old simulator randomized Voltage/Current and computed V*I; it never produced
+  an aggregate total. It is now removed. Do not diagnose unexpected controller values
+  as a sum or cache issue without evidence.
 
 ## Local logger configuration
 
@@ -280,11 +284,68 @@ names assigned by users/controllers.
 - Console: `matter esp logger` shows stored configuration; the CLI sends
   `matter esp logger set <host> <port> <8-hex-token>`. Report errors/timeouts, never
   treat echoed input or an old acknowledgement as a successful config write.
-- Config persistence does not implement actual logger communication. Sensors remain
-  simulated. Do not infer protocol, unit ID, or register map merely from port 502.
+- Config persistence is separate from the Modbus worker. Firmware polls configured
+  host/port with the explicitly selected deye-single map/unit 1; do not infer a
+  different register map or protocol merely from port 502.
 
 - Verified on 2026-11-01: native Windows build, 15 CLI tests, COM3 flash and
   automatic local config application acknowledged after NVS commit/read-back.
   After USB reset, console read still returned 192.168.5.190:502; existing Matter
   traffic and temperature/power updates continued. Config-only USB application
-  was also checked without another flash. Actual logger communication is not tested.
+  was also checked without another flash. This was the config-only verification;
+  subsequent live Modbus work is described below.
+
+## Live Modbus implementation
+
+- The user requested reusing the earlier Homebridge inverter model/map. Found it in
+  sibling `../deye-inverter` (read-only reference): SUN-6K-SG05LP1-EU-SM2-P,
+  single-phase hybrid, Modbus TCP FC03, unit 1. Preserve ESP project metadata rather
+  than hardcoding the inverter hardware model into every sensor's identity.
+- Only FC03 is implemented. Never write inverter registers/settings without an
+  explicit new request; writing local log files is not authorization for Modbus writes.
+- `profiles/deye-single.json` is the single register/scale source for Python and
+  generated firmware header. Six sequential groups: 90-91, 109-112, 150, 157-160,
+  169, 178-191 (26 words). One connection per group matches the earlier logger behavior.
+  No energy counters or speculative broad scans. A failed group does not cancel others.
+- W/V/A registers: PV1 186/109/110; PV2 187/111/112; Grid 169/150/160;
+  Load 178/157/179; Battery 190/183/191. Voltage scale: PV/Grid/Load 0.1 V,
+  Battery 0.01 V. Current scale: PV 0.1 A, Grid/Load/Battery 0.01 A. Power is 1 W.
+  Grid/Load/Battery power/current are signed int16 (0xffff=-1); unsigned 0xffff
+  is unavailable. Zero is valid. Battery power positive=discharge, negative=charge;
+  Grid positive=import, negative=export. Grid is internal metering, not external CT.
+- Temperatures: DC 90, AC 91, Battery 182; offset 1000, 0.1 C, raw valid 0..3000.
+  SOC 184 (0..100%) is CLI-only and adds no request to the existing battery block.
+  Keep retired Matter battery-percentage functionality removed.
+- Firmware network I/O runs in its own task, never under the ChipStack lock or on
+  the Matter thread. Publish one owned snapshot via ScheduleWork; wait for its
+  completion before starting the next interval, preventing an unbounded work queue.
+  Config is read once at each cycle, so USB config updates apply next cycle.
+- Per-group deadline: 3 seconds, bounded response <=260 bytes. Validate transaction,
+  protocol, unit, MBAP length, function/exception, and byte count; handle fragmented
+  sends/reads and socket closure. No stale values or random fallback after failures.
+- `uv run fw read` defaults to one snapshot using config.local.json, logs JSONL to
+  ignored `.local/deye.jsonl`. Use --count N for finite sampling or --watch in the
+  foreground (Ctrl+C). --grid-only reads only 150. --json prints JSONL to stdout;
+  --log selects an append log with UTC timestamps, values, raw/registers, group words,
+  errors and timings. --host/--logger-port/--unit-id/--timeout are CLI overrides;
+  firmware currently fixes unit=1/profile=deye-single. No background polling CLI.
+- Tests: `uv run fw test` discovers all scripts/test_*.py. Fake logger covers
+  fragmentation, invalid MBAP/FC03, exceptions, timeout/closure, group isolation,
+  sentinels, scaling, finite logging and recovery. When a host g++/clang++ exists,
+  compile/run the actual firmware decoder/protocol tests too.
+- A successful read establishes transport/decoding, not agreement with the inverter
+  display. The first live CLI snapshot had Grid 1160 W/214.7 V/0.89 A and Load
+  1110 W/216.1 V/0.27 A. Preserve raw data and the documented 0.01 A scale; these
+  AC currents still need comparison with the physical display. Do not change the
+  scale or infer current from watts just to make values look consistent.
+- Protocol references: https://www.modbus.org/docs/Modbus_Messaging_Implementation_Guide_V1_0b.pdf
+  and https://www.photovoltaikforum.com/core/attachment/449240-deye-modbus-protocol-v118-pdf/
+
+- Live implementation verified on 2026-11-01: native Windows firmware build/COM3
+  flash, 23 tests including native C++ checks, five live EPM read/encoding checks,
+  and repeated real logger snapshots. A single continuously open USB session proved
+  all sensors unavailable during an offline test and recovered after restoring
+  local config, with monotonic uptime (no reboot), no fabricated Grid outage, and
+  no crash. Logger config restored to 192.168.5.190:502; pairing retained.
+  Three CLI samples took 672/500/485 ms; these are observations, not performance guarantees.
+  Local comparison files: .local/deye.jsonl and .local/deye-readings.md (ignored).

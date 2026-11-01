@@ -1,16 +1,13 @@
-#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 
 #include <esp_log.h>
 #include <esp_mac.h>
-#include <esp_random.h>
 #include <esp_matter.h>
 #include <esp_matter_console.h>
 #include <nvs_flash.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 #include <app/EventLogging.h>
 #include <app/AttributeAccessInterfaceRegistry.h>
 #include <app/AttributeValueEncoder.h>
@@ -25,7 +22,6 @@
 
 namespace {
 constexpr char TAG[] = "deye_sensors";
-constexpr uint32_t UPDATE_INTERVAL_MS = 5000;
 
 // Matter TemperatureMeasurement values are signed hundredths of a degree Celsius.
 struct Sensor {
@@ -33,14 +29,14 @@ struct Sensor {
     const char *identity_key;
     int16_t minimum;
     int16_t maximum;
-    int16_t temperature;
+    deye::Index metric;
     uint16_t endpoint;
 };
 
 Sensor sensors[] = {
-    {"AC Temperature", "AC", 2500, 5500, 3200, 0},
-    {"DC Temperature", "DC", 3000, 6500, 3600, 0},
-    {"Battery Temperature", "Battery", 2000, 4500, 2800, 0},
+    {"AC Temperature", "AC", -10000, 20000, deye::acC, 0},
+    {"DC Temperature", "DC", -10000, 20000, deye::dcC, 0},
+    {"Battery Temperature", "Battery", -10000, 20000, deye::batteryC, 0},
 };
 
 struct ContactSensor {
@@ -49,7 +45,7 @@ struct ContactSensor {
     uint16_t endpoint;
 };
 
-ContactSensor grid{"Grid", true, 0};
+ContactSensor grid{"Grid", false, 0};
 
 void verify_parts_list(chip::EndpointId endpoint, const chip::EndpointId *expected, size_t count)
 {
@@ -122,59 +118,58 @@ void configure_bridge_topology()
     }
 }
 
-void update_sensors(intptr_t)
+void set_reachable(uint16_t endpoint, bool reachable)
 {
     using namespace chip::app::Clusters;
-    // ScheduleWork runs on the Matter thread, where attribute updates are safe.
-    for (auto &sensor : sensors) {
-        const int step = static_cast<int>(esp_random() % 101) - 50;
-        const int16_t next = static_cast<int16_t>(std::clamp(
-            sensor.temperature + step, static_cast<int>(sensor.minimum), static_cast<int>(sensor.maximum)));
-        auto value = esp_matter_nullable_int16(next);
-        const esp_err_t error = esp_matter::attribute::update(sensor.endpoint,
-            TemperatureMeasurement::Id, TemperatureMeasurement::Attributes::MeasuredValue::Id, &value);
-        if (error == ESP_OK) {
-            sensor.temperature = next;
-            ESP_LOGI(TAG, "TEMP %s endpoint=%u value=%.2f C (simulated)",
-                     sensor.name, sensor.endpoint, sensor.temperature / 100.0);
-        } else {
-            ESP_LOGE(TAG, "TEMP %s update failed: %s", sensor.name, esp_err_to_name(error));
-        }
-    }
-
-    // For a Matter Contact Sensor, true means closed/contact; false means open.
-    const bool closed = (esp_random() & 1u) != 0;
-    auto value = esp_matter_bool(closed);
-    const esp_err_t error = esp_matter::attribute::update(grid.endpoint,
-        BooleanState::Id, BooleanState::Attributes::StateValue::Id, &value);
-    if (error != ESP_OK) {
-        ESP_LOGE(TAG, "CONTACT Grid update failed: %s", esp_err_to_name(error));
-        return;
-    }
-    const bool changed = closed != grid.closed;
-    grid.closed = closed;
-    if (changed) {
-        chip::EventNumber event_number;
-        BooleanState::Events::StateChange::Type event{closed};
-        const auto event_error = chip::app::LogEvent(event, grid.endpoint, event_number);
-        if (event_error != CHIP_NO_ERROR) {
-            ESP_LOGE(TAG, "CONTACT Grid event failed: %s", event_error.AsString());
-        }
-    }
-    ESP_LOGI(TAG, "CONTACT Grid endpoint=%u state=%s (simulated)",
-             grid.endpoint, grid.closed ? "CLOSED" : "OPEN");
-    electrical_measurements::update(grid.closed);
+    auto value = esp_matter_bool(reachable);
+    ESP_ERROR_CHECK(esp_matter::attribute::update(endpoint, BridgedDeviceBasicInformation::Id,
+        BridgedDeviceBasicInformation::Attributes::Reachable::Id, &value));
 }
 
-void simulation_task(void *)
+void update_sensors(intptr_t context)
 {
-    for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(UPDATE_INTERVAL_MS));
-        const auto error = chip::DeviceLayer::PlatformMgr().ScheduleWork(update_sensors, 0);
-        if (error != CHIP_NO_ERROR) {
-            ESP_LOGE(TAG, "Cannot schedule sensor update: %s", error.AsString());
+    using namespace chip::app::Clusters;
+    // Network I/O completed on the worker; this callback only publishes Matter state.
+    const std::unique_ptr<inverter_data::Snapshot> snapshot(reinterpret_cast<inverter_data::Snapshot *>(context));
+    for (auto &sensor : sensors) {
+        const auto reading = snapshot->get(sensor.metric);
+        auto value = reading ? esp_matter_nullable_int16(static_cast<int16_t>(*reading)) :
+                               esp_matter_nullable_int16(nullable<int16_t>());
+        const auto error = esp_matter::attribute::update(sensor.endpoint, TemperatureMeasurement::Id,
+            TemperatureMeasurement::Attributes::MeasuredValue::Id, &value);
+        set_reachable(sensor.endpoint, reading.has_value() && error == ESP_OK);
+        if (reading && error == ESP_OK) {
+            ESP_LOGI(TAG, "TEMP %s endpoint=%u value=%.2f C register=%u (Modbus)",
+                sensor.name, sensor.endpoint, *reading / 100.0, deye::METRICS[sensor.metric].address);
+        } else {
+            ESP_LOGW(TAG, "TEMP %s endpoint=%u unavailable", sensor.name, sensor.endpoint);
         }
     }
+    const auto voltage = snapshot->get(deye::gridVoltageV);
+    set_reachable(grid.endpoint, voltage.has_value());
+    if (voltage) {
+        // Voltage presence with hysteresis, not power or the grid relay status.
+        const bool closed = *voltage >= (grid.closed ? 80000 : 100000);
+        auto value = esp_matter_bool(closed);
+        const auto error = esp_matter::attribute::update(grid.endpoint, BooleanState::Id,
+            BooleanState::Attributes::StateValue::Id, &value);
+        set_reachable(grid.endpoint, error == ESP_OK);
+        if (error == ESP_OK) {
+            if (closed != grid.closed) {
+                chip::EventNumber number;
+                BooleanState::Events::StateChange::Type event{closed};
+                const auto event_error = chip::app::LogEvent(event, grid.endpoint, number);
+                if (event_error != CHIP_NO_ERROR) ESP_LOGW(TAG, "Grid event: %s", event_error.AsString());
+            }
+            grid.closed = closed;
+            ESP_LOGI(TAG, "CONTACT Grid endpoint=%u state=%s voltage=%.3f V (Modbus)",
+                     grid.endpoint, closed ? "CLOSED" : "OPEN", *voltage / 1000.0);
+        }
+    } else {
+        ESP_LOGW(TAG, "CONTACT Grid unavailable; retaining state, no outage event");
+    }
+    electrical_measurements::update(*snapshot);
+    inverter_data::publication_complete();
 }
 
 void attach_to_bridge(esp_matter::endpoint_t *sensor_endpoint, esp_matter::endpoint_t *bridge,
@@ -236,15 +231,14 @@ void create_sensor(esp_matter::node_t *node, esp_matter::endpoint_t *bridge, Sen
 {
     using namespace esp_matter;
     endpoint::temperature_sensor::config_t config{};
-    config.temperature_measurement.measured_value = sensor.temperature;
+    config.temperature_measurement.measured_value = nullable<int16_t>();
     config.temperature_measurement.min_measured_value = sensor.minimum;
     config.temperature_measurement.max_measured_value = sensor.maximum;
     auto *sensor_endpoint = endpoint::temperature_sensor::create(node, &config, ENDPOINT_FLAG_NONE, nullptr);
     attach_to_bridge(sensor_endpoint, bridge, sensor.name, mac, sensor.identity_key, sensor.identity_key);
     sensor.endpoint = endpoint::get_id(sensor_endpoint);
-    ESP_LOGI(TAG, "TEMP %s endpoint=%u initial=%.2f C range=%.2f..%.2f C (simulated)",
-             sensor.name, sensor.endpoint, sensor.temperature / 100.0,
-             sensor.minimum / 100.0, sensor.maximum / 100.0);
+    ESP_LOGI(TAG, "TEMP %s endpoint=%u register=%u; awaiting Modbus", sensor.name,
+             sensor.endpoint, deye::METRICS[sensor.metric].address);
 }
 
 void create_grid_sensor(esp_matter::node_t *node, esp_matter::endpoint_t *bridge,
@@ -261,7 +255,7 @@ void create_grid_sensor(esp_matter::node_t *node, esp_matter::endpoint_t *bridge
         abort();
     }
     grid.endpoint = endpoint::get_id(sensor_endpoint);
-    ESP_LOGI(TAG, "CONTACT Grid endpoint=%u initial=CLOSED (simulated)", grid.endpoint);
+    ESP_LOGI(TAG, "CONTACT Grid endpoint=%u awaiting Modbus voltage", grid.endpoint);
 }
 
 esp_err_t on_identify(esp_matter::identification::callback_type_t type, uint16_t endpoint,
@@ -358,6 +352,8 @@ extern "C" void app_main()
     device_identity::install_provider(mac);
     electrical_measurements::start(node);
     configure_bridge_topology();
+    for (const auto &sensor : sensors) set_reachable(sensor.endpoint, false);
+    set_reachable(grid.endpoint, false);
     if (chip::Server::GetInstance().GetFabricTable().FabricCount() == 0) {
         PrintOnboardingCodes(chip::RendezvousInformationFlags(chip::RendezvousInformationFlag::kBLE));
     }
@@ -370,10 +366,6 @@ extern "C" void app_main()
     ESP_ERROR_CHECK(esp_matter::console::init());
 #endif
 
-    if (xTaskCreate(simulation_task, "sensor_sim", 3072, nullptr, 5, nullptr) != pdPASS) {
-        ESP_LOGE(TAG, "Cannot start sensor simulation");
-        abort();
-    }
-    ESP_LOGI(TAG, "Simulation running: 3 temperatures + Grid contact + 5 power sensors, update every %lu ms",
-             static_cast<unsigned long>(UPDATE_INTERVAL_MS));
+    inverter_data::start(update_sensors);
+    ESP_LOGI(TAG, "Modbus polling: deye-single unit=1, 6 sequential FC03 groups; 5 seconds after each cycle");
 }

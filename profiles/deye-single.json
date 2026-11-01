@@ -1,0 +1,27 @@
+{
+  "id": "deye-single",
+  "reference_model": "SUN-6K-SG05LP1-EU-SM2-P",
+  "unit_id": 1,
+  "groups": [[90, 2], [109, 4], [150, 1], [157, 4], [169, 1], [178, 14]],
+  "metrics": [
+    {"key": "dcC", "register": 90, "multiplier": 10, "offset": -10000, "maximum_raw": 3000, "divisor": 100},
+    {"key": "acC", "register": 91, "multiplier": 10, "offset": -10000, "maximum_raw": 3000, "divisor": 100},
+    {"key": "batteryC", "register": 182, "multiplier": 10, "offset": -10000, "maximum_raw": 3000, "divisor": 100},
+    {"key": "batteryPercent", "register": 184, "multiplier": 1, "maximum_raw": 100, "divisor": 1},
+    {"key": "pv1PowerW", "register": 186, "multiplier": 1000, "divisor": 1000},
+    {"key": "pv1VoltageV", "register": 109, "multiplier": 100, "divisor": 1000},
+    {"key": "pv1CurrentA", "register": 110, "multiplier": 100, "divisor": 1000},
+    {"key": "pv2PowerW", "register": 187, "multiplier": 1000, "divisor": 1000},
+    {"key": "pv2VoltageV", "register": 111, "multiplier": 100, "divisor": 1000},
+    {"key": "pv2CurrentA", "register": 112, "multiplier": 100, "divisor": 1000},
+    {"key": "gridPowerW", "register": 169, "signed": true, "multiplier": 1000, "divisor": 1000},
+    {"key": "gridVoltageV", "register": 150, "multiplier": 100, "divisor": 1000},
+    {"key": "gridCurrentA", "register": 160, "signed": true, "multiplier": 10, "divisor": 1000},
+    {"key": "loadPowerW", "register": 178, "signed": true, "multiplier": 1000, "divisor": 1000},
+    {"key": "loadVoltageV", "register": 157, "multiplier": 100, "divisor": 1000},
+    {"key": "loadCurrentA", "register": 179, "signed": true, "multiplier": 10, "divisor": 1000},
+    {"key": "batteryPowerW", "register": 190, "signed": true, "multiplier": 1000, "divisor": 1000},
+    {"key": "batteryVoltageV", "register": 183, "multiplier": 10, "divisor": 1000},
+    {"key": "batteryCurrentA", "register": 191, "signed": true, "multiplier": 10, "divisor": 1000}
+  ]
+}

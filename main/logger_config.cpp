@@ -13,11 +13,6 @@ namespace logger_config {
 namespace {
 constexpr char TAG[] = "logger_config";
 constexpr char NAMESPACE[] = "deye_logger";
-struct Settings {
-    uint32_t version;
-    char host[64];
-    uint16_t port;
-};
 
 bool valid_host(const char *host)
 {
@@ -53,7 +48,7 @@ esp_err_t command(int argc, char **argv)
         Settings settings{};
         const auto error = load(settings);
         if (error == ESP_OK) {
-            std::printf("LOGGER_CONFIG host=%s port=%u (stored; simulator still active)\n", settings.host, settings.port);
+            std::printf("LOGGER_CONFIG host=%s port=%u unit=1 profile=deye-single\n", settings.host, settings.port);
         } else {
             std::printf("LOGGER_CONFIG not configured: %s\n", esp_err_to_name(error));
         }
@@ -89,16 +84,18 @@ esp_err_t command(int argc, char **argv)
 }
 } // namespace
 
+esp_err_t get(Settings &settings) { return load(settings); }
+
 void init()
 {
     Settings settings{};
     const auto error = load(settings);
     if (error == ESP_OK) {
-        ESP_LOGI(TAG, "Logger host=%s port=%u (stored; simulator still active)", settings.host, settings.port);
+        ESP_LOGI(TAG, "Logger host=%s port=%u unit=1 profile=deye-single", settings.host, settings.port);
     } else if (error == ESP_ERR_NVS_NOT_FOUND) {
-        ESP_LOGI(TAG, "Logger not configured; simulator still active");
+        ESP_LOGI(TAG, "Logger not configured; readings unavailable");
     } else {
-        ESP_LOGW(TAG, "Cannot load logger config: %s; simulator still active", esp_err_to_name(error));
+        ESP_LOGW(TAG, "Cannot load logger config: %s; readings unavailable", esp_err_to_name(error));
     }
 }
 

@@ -1,80 +1,91 @@
-# ESP32-C3 Matter sensors (draft)
+# ESP32-C3 Deye Matter sensors
 
-Firmware nháp ESP-Matter: một thiết bị Wi-Fi, ba cảm biến nhiệt độ giả lập
-**AC Temperature**, **DC Temperature**, **Battery Temperature**. Mỗi cảm biến là một Temperature Sensor (0x0302), có
-cluster Temperature Measurement (0x0402), NodeLabel và UniqueID riêng. Có thêm
-Contact Sensor **Grid** (0x0015), dùng Boolean State (0x0045).
-Endpoint 0 là Root Node; một aggregator gom các thiết bị con theo mô hình Matter bridge.
-Switch mẫu đã được bỏ. Không cần cảm biến vật lý, relay hay GPIO ngoài.
+Firmware ESP-Matter đọc dữ liệu thật qua **Modbus TCP, FC03**, đưa lên 9 sensor
+Matter: AC/DC/Battery Temperature, Grid contact, PV1/PV2/Grid/Battery/Load Power.
+Đã bỏ simulator; không phát random hoặc số mặc định khi mất kết nối.
+Giữ nguyên endpoint, UniqueID, metadata và pairing của bản trước.
 
-| Sensor | Nhiệt độ ban đầu | Khoảng giả lập |
-| --- | --- | --- |
-| AC Temperature | 32 °C | 25–55 °C |
-| DC Temperature | 36 °C | 30–65 °C |
-| Battery Temperature | 28 °C | 20–45 °C |
+Profile hiện tại là **deye-single**, từ dự án Homebridge đã dùng với
+**SUN-6K-SG05LP1-EU-SM2-P**, unit ID **1**. Không mặc định hỗ trợ mọi model Deye.
+Register map dùng chung cho firmware và CLI ở
+[profiles/deye-single.json](profiles/deye-single.json); firmware sinh header khi build.
+Tham khảo [Deye Modbus protocol v118](https://www.photovoltaikforum.com/core/attachment/449240-deye-modbus-protocol-v118-pdf/).
 
-Cứ **5 giây**, mỗi giá trị tăng/giảm ngẫu nhiên tối đa 0,50 °C, giới hạn trong
-khoảng trên. Giá trị dùng đơn vị 0,01 °C theo Matter; cập nhật trên Matter thread
-để controller nhận qua subscription. Đây chỉ là dữ liệu mô phỏng; AC Temperature/DC Temperature/Battery Temperature
-đều là nhiệt độ, chưa có đo điện áp hoặc dòng điện thực.
+| Endpoint | Sensor | Register | Quy đổi |
+| --- | --- | --- | --- |
+| 2 | AC Temperature | 91 | (raw − 1000) / 10 °C |
+| 3 | DC Temperature | 90 | (raw − 1000) / 10 °C |
+| 4 | Battery Temperature | 182 | (raw − 1000) / 10 °C |
+| 5 | Grid | 150 | Điện áp lưới; CLOSED khi ≥100 V, giữ CLOSED khi ≥80 V |
+| 7 | PV1 Power (DC) | W=186, V=109, A=110 | 1 W; 0,1 V; 0,1 A |
+| 8 | PV2 Power (DC) | W=187, V=111, A=112 | 1 W; 0,1 V; 0,1 A |
+| 9 | Grid Power (AC) | W=169, V=150, A=160 | 1 W; 0,1 V; 0,01 A |
+| 10 | Battery Power (DC) | W=190, V=183, A=191 | 1 W; 0,01 V; 0,01 A |
+| 11 | Load Power (AC) | W=178, V=157, A=179 | 1 W; 0,1 V; 0,01 A |
 
-Grid bắt đầu ở trạng thái **CLOSED**, sau đó chọn ngẫu nhiên OPEN/CLOSED mỗi 5 giây.
-`StateValue=true` là CLOSED, `false` là OPEN theo
-[quy ước Contact Sensor của Espressif](https://docs.espressif.com/projects/arduino-esp32/en/latest/matter/ep_contact_sensor.html).
-Mỗi lần đổi trạng thái, firmware cập nhật attribute và phát event StateChange để
-controller nhận thay đổi. Đây là contact giả lập, chưa đọc tín hiệu điện lưới thực.
-Grid có NodeLabel/UniqueID riêng và được thêm sau ba sensor nhiệt độ để giữ nguyên
-endpoint/định danh của các sensor nhiệt độ.
+Grid/Load/Battery W và A là signed int16; raw `65535` nghĩa là −1,
+không phải unavailable. Điện áp và PV W/A là unsigned, `65535` là unavailable;
+0 là số đo hợp lệ. Grid dương=nhập, âm=xuất; Battery dương=xả, âm=sạc.
+**ActivePower đọc trực tiếp từ thanh ghi**, không tính V×A, không cộng tổng các kênh.
+Grid dùng internal metering, không phải external CT 170–172. Load là total load
+với điện áp/dòng L1 theo map single-phase; cần so với màn hình và wiring thực tế.
 
-### Điện áp, dòng điện và công suất (bản nháp)
+### Gom nhóm đọc và xử lý lỗi
 
-Năm kênh mới dùng Electrical Sensor (0x0510), Power Topology (TreeTopology) và
-cluster **ElectricalPowerMeasurement (0x0090)**. Tên hiển thị theo cùng quy ước
-với Temperature: **PV1 Power**, **PV2 Power**, **Grid Power**, **Battery Power**, **Load Power**.
+Mỗi vòng dùng 6 nhóm tuần tự: **90–91, 109–112, 150, 157–160, 169, 178–191**,
+tổng **26 words**. Không đọc cả dải lớn hoặc gửi request song song trong một client.
+Nhóm lỗi chỉ làm các giá trị thuộc nhóm đó unavailable; các nhóm khác vẫn được đọc.
+Mỗi nhóm có deadline 3 giây, kiểm tra MBAP transaction/protocol/unit ID, độ dài,
+FC03/exception và byte count, hỗ trợ response bị chia nhiều TCP packet.
+Mỗi nhóm dùng kết nối riêng theo cách logger đã hoạt động trong dự án Homebridge.
 
-| Endpoint | Tên | PowerMode | Điện áp giả lập | Dòng điện giả lập |
-| --- | --- | --- | --- | --- |
-| 7 | PV1 Power | DC | 250–450 V | 0–12 A |
-| 8 | PV2 Power | DC | 250–450 V | 0–12 A |
-| 9 | Grid Power | AC | 220–240 V khi Grid CLOSED; 0 V khi OPEN | −10–10 A; 0 A khi OPEN |
-| 10 | Battery Power | DC | 48–56 V | −30–30 A |
-| 11 | Load Power | AC | 220–240 V | 0–20 A |
+Worker mạng chạy riêng, chỉ chuyển snapshot sang Matter thread để cập nhật.
+Vòng tiếp theo bắt đầu **5 giây sau khi vòng trước đã publish xong**, không chồng vòng.
+Nếu mất dữ liệu, nhiệt độ và từng V/A/W trả `null`; sensor thiếu dữ liệu được đánh
+`Reachable=false`. Grid giữ trạng thái trước đó nhưng unreachable, không phát
+sự kiện mất điện từ lỗi mạng. Khi đọc lại thành công, sensor tự phục hồi.
+Không ép số điện về 0 dựa trên Grid contact; giữ nguyên số inverter báo.
 
-Đây là cấu hình mô phỏng để thử controller, chưa phải dải điện áp/dòng điện của
-inverter/BMS thực tế. Các kênh cập nhật mỗi 5 giây bằng random walk có giới hạn.
-Grid Power đồng bộ với contact Grid. Quy ước dấu: Grid dương = nhập điện,
-âm = xuất điện; Battery dương = xả, âm = sạc; PV dương = phát điện.
-Load Power mô phỏng tải đầu ra inverter, luôn có dòng không âm; vẫn được cấp
-điện khi Grid OPEN (giả lập inverter dùng PV/pin).
+Electrical Sensor (0x0510) dùng PowerTopology **TreeTopology** (`0x02`) và
+ElectricalPowerMeasurement (0x0090), đúng AC/DC cho từng kênh, đơn vị mV/mA/mW.
+Không thêm frequency, RMS hoặc energy counter. Accuracy dùng biên biểu diễn
+thanh ghi rộng; không quảng cáo độ chính xác hiệu chuẩn chưa biết.
+Mỗi leaf có PartsList rỗng, tất cả là con của aggregator 1. Không dùng NodeTopology
+vì số đo sẽ áp dụng toàn node. Người dùng đã xác nhận sửa TREE hết lỗi Power
+hiển thị trong Temperature; chưa xác định số Power trước đó thuộc kênh nào.
+Firmware kiểm tra FeatureMap, PartsList Read/TLV decode và EPM Read/TLV encode
+khi boot, rồi kiểm tra EPM thêm khi có bộ số đo thật đầu tiên.
 
-Ưu tiên hai attribute **Voltage** và **ActiveCurrent**; giữ **ActivePower** bắt buộc.
-Đơn vị trên Matter là mV, mA, mW; log đổi sang V/A/W. Công suất giả lập tính
-`P = V × I` (Grid/Load dùng mô hình hệ số công suất 1). Không thêm frequency, RMS,
-reactive/apparent power hay thông số phụ trong bản thử này.
+Power Source/% pin trên Matter vẫn được hoãn theo yêu cầu; không tái dùng endpoint 6.
+CLI có thể đọc SOC từ register 184 (nằm sẵn trong nhóm 178–191) để chẩn đoán,
+nhưng không đưa lại % pin vào Matter hoặc Temperature.
 
-Delegate đọc dữ liệu từ từng kênh; Instance giữ đúng optional mask cho Voltage và
-ActiveCurrent. Firmware kiểm tra đường đọc/encode Matter khi khởi động và đánh
-dấu reporting khi giá trị thay đổi. Khác với việc chỉ ghi số vào log, các giá trị
-này có thể được controller đọc qua cluster. Tham khảo
-[hướng dẫn delegate của Espressif](https://docs.espressif.com/projects/esp-matter/en/latest/esp32/app_guide.html).
-Apple Home có thể chưa hiển thị Electrical Sensor hoặc từng attribute: cần thử
-trên controller hiện tại, không suy ra khả năng UI từ kết quả build/log.
+### CLI đọc local và log đối chiếu
 
-Bridge dùng tree composition: các sensor là endpoint ngang hàng; PartsList của
-mỗi sensor rỗng. Temperature không chứa ElectricalPowerMeasurement/PowerTopology.
-Các kênh điện dùng PowerTopology **TreeTopology** (FeatureMap `0x02`), nên số đo
-chỉ thuộc chính kênh đó. Không dùng NodeTopology vì nó áp dụng số đo cho toàn node,
-kể cả các sensor nhiệt độ không liên quan. Đây là cấu hình riêng với Descriptor
-composition. Bản sửa PartsList trước đó chưa giải quyết được hiện tượng app hiển thị
-tổng Power trong Temperature theo xác nhận của người dùng.
-Firmware kiểm tra cả mã hóa/giải mã PartsList khi boot. Nếu app vẫn gom Power
-vào Temperature sau cập nhật, cần kiểm tra cách controller đọc topology và cache;
-firmware không tự xóa pairing.
+Dùng host/port từ `config.local.json` hoặc `--config`, có thể override bằng
+`--host`, `--logger-port`. Không cần board ESP32 hay SDK để dùng CLI đọc logger.
+CLI chỉ gửi FC03, không có lệnh ghi thanh ghi inverter.
 
-Tính năng % pin lưu trữ qua Power Source đã được bỏ khỏi bản hiện tại sau khi
-người dùng thử trên Apple Home/HomeKit và nhận thông báo không hỗ trợ. Endpoint 6
-không còn được tạo; tính năng này hoãn đến tương lai. Battery Temperature vẫn
-chỉ báo nhiệt độ. Không thay % pin bằng một sensor nhiệt độ/độ ẩm giả.
+```sh
+# Một snapshot, in bảng W/V/A và nhiệt độ
+uv run fw read
+# Ba snapshot, nghỉ 5 giây sau mỗi vòng
+uv run fw read --count 3
+# Quan sát foreground; thoát bằng Ctrl+C
+uv run fw read --watch
+# JSONL đầy đủ trên stdout và file
+uv run fw read --once --json --log .local/deye.jsonl
+# Chỉ kiểm tra điện áp lưới, đúng một request
+uv run fw read --grid-only
+# Override khi cần chẩn đoán logger khác
+uv run fw read --host 192.168.1.100 --logger-port 502 --unit-id 1
+```
+
+Mặc định append `.local/deye.jsonl` (gitignore). Mỗi dòng có timestamp UTC,
+profile, host/port/unit, giá trị theo đơn vị C/V/A/W, raw từng metric, địa chỉ
+thanh ghi, toàn bộ words của mỗi nhóm, lỗi và thời gian đọc. CLI báo lỗi nếu
+snapshot thiếu dữ liệu nhưng vẫn lưu phần đọc được. `--unit-id` và `--timeout`
+là tùy chọn chẩn đoán CLI; firmware hiện dùng unit 1, timeout 3 giây.
 
 Metadata của bridge và từng thiết bị con:
 
@@ -191,9 +202,9 @@ giữ qua reboot. Thao tác này không xóa hoặc ghi đè Wi-Fi/fabric Matter
 partition layout. Host hỗ trợ IPv4/hostname ASCII dài 1–63 ký tự; port 1–65535.
 Xem cấu hình bằng console `matter esp logger`.
 
-**Hiện mới lưu cấu hình logger; chưa kết nối hoặc đọc thanh ghi inverter.**
-Các sensor vẫn chạy dữ liệu giả lập. Port 502 chưa đủ để xác định giao thức,
-unit ID hoặc register map của logger/inverter thực tế.
+Firmware đọc cấu hình ở đầu mỗi vòng, nên đổi host/port qua USB có hiệu lực
+ở vòng tiếp theo. Profile firmware hiện cố định deye-single, unit ID 1;
+không suy ra register map chỉ từ port 502.
 
 ## Dev, deploy và xem log
 
@@ -281,22 +292,20 @@ khi giải nén. Firmware CI chạy trên cùng ESP32-C3 dù được build từ
 4. Chọn Wi-Fi **2.4 GHz**, chờ `PAIR complete; temperature, contact and electrical power sensors are ready`.
    Điện thoại/controller và board cần mạng LAN cho phép IPv6, mDNS/multicast;
    tránh mạng guest cô lập client.
-5. Xem các sensor mà controller hỗ trợ; monitor ghi giá trị giả lập mỗi 5 giây, ví dụ:
+5. Xem các sensor mà controller hỗ trợ; monitor in dữ liệu Modbus, ví dụ:
 
 ```text
-deye_sensors: TEMP AC Temperature endpoint=2 value=32.15 C (simulated)
-deye_sensors: TEMP DC Temperature endpoint=3 value=35.72 C (simulated)
-deye_sensors: TEMP Battery Temperature endpoint=4 value=28.04 C (simulated)
-deye_sensors: CONTACT Grid endpoint=5 state=CLOSED (simulated)
-deye_sensors: POWER PV1 Power endpoint=7 mode=DC voltage=320.000 V current=5.000 A power=1600.000 W (simulated)
-deye_sensors: POWER PV2 Power endpoint=8 mode=DC voltage=340.000 V current=4.000 A power=1360.000 W (simulated)
-deye_sensors: POWER Grid Power endpoint=9 mode=AC voltage=230.000 V current=3.500 A power=805.000 W (simulated)
-deye_sensors: POWER Battery Power endpoint=10 mode=DC voltage=51.200 V current=-5.000 A power=-256.000 W (simulated)
+deye_modbus: FC03 logger:502 unit=1 registers=90..91 status=ok elapsed_ms=110
+deye_sensors: TEMP AC Temperature endpoint=2 value=43.60 C register=91 (Modbus)
+deye_sensors: CONTACT Grid endpoint=5 state=CLOSED voltage=214.700 V (Modbus)
+deye_sensors: POWER Grid Power endpoint=9 mode=AC voltage=214.700 V current=0.890 A power=1160.000 W (Modbus)
 ```
+
+Các số trên là ví dụ một snapshot, không phải giá trị cố định.
 
 Endpoint ID thực tế được in ở log boot. Identify cũng ghi log, không nháy LED.
 Credentials và fabric do SDK lưu trong NVS, không cần pair lại sau mỗi lần reboot.
-Các giá trị mô phỏng bắt đầu lại từ nhiệt độ ban đầu sau reboot, không ghi NVS mỗi chu kỳ.
+Sau reboot, giá trị bắt đầu unavailable đến khi đọc được Modbus; không ghi số đo vào NVS mỗi chu kỳ.
 Firmware dùng chứng chỉ và VID/PID thử nghiệm; controller có thể yêu cầu chấp nhận
 thiết bị chưa được chứng nhận. Đây là cấu hình phát triển, không dùng để sản xuất.
 
@@ -345,29 +354,26 @@ uv run fw erase-flash --port COM3
 uv run fw flash --port COM3
 ```
 
-## Kiểm tra trên board
+## Kiểm chứng
 
-Bản sensor đã được build/flash trên ESP32-C3 COM3: ba nhiệt độ ở endpoint 2/3/4,
-Grid ở endpoint 5, cập nhật mỗi 5 giây; manufacturer/model/serial đúng cấu hình.
-Thử nghiệm Power Source trước đây đã chạy được trên firmware nhưng người dùng
-xác nhận Apple Home báo không hỗ trợ, nên endpoint 6 được loại bỏ. Pairing được
-giữ khi flash. Checklist cho bản hiện tại:
+Chạy `uv run fw test`: kiểm tra CLI/config, fake logger loopback, response phân
+mảnh, lỗi MBAP/FC03, timeout, lỗi một nhóm, sentinel/signed/scale và JSONL.
+Nếu có compiler C++ host (g++/clang++), suite biên dịch và chạy decoder/protocol
+firmware trên host; không cần SDK hoặc truy cập inverter cho các unit test.
 
-Năm Electrical Sensor ở 7/8/9/10/11 đã build/flash và qua kiểm tra AAI Read/TLV
-encode trên board. Log Voltage/ActiveCurrent/ActivePower đúng đơn vị và P=V×I.
-Descriptor PartsList đã được đọc/giải mã trên board: bridge có 9 con, từng
-sensor có 0 con. Mức hỗ trợ hiển thị trong Apple Home đang chờ người dùng thử.
+Giữ các kiểm tra trên board: 9 leaf endpoint/identity ổn định, PowerTopology TREE,
+PartsList rỗng, EPM read/encode với số đo thật, temp/contact/power cập nhật và
+phục hồi sau lỗi logger. Build/read/log pass không đồng nghĩa mọi số đo đã được
+đối chiếu với màn hình inverter hoặc mọi attribute hiển thị trong Apple Home.
+Không tự factory reset để kiểm chứng cập nhật này.
 
-- Boot chưa pair: log QR/manual code và bốn sensor AC Temperature, DC Temperature, Battery Temperature, Grid.
-- Điện: đọc Voltage/ActiveCurrent/ActivePower của PV1 Power, PV2 Power, Grid Power,
-  Battery Power, Load Power ở 7/8/9/10/11; không có endpoint Power Source 6 sau khi startup hoàn tất.
-- Pair: có IP, `PAIR complete`, controller nhận temperature/contact; không còn endpoint Power Source.
-- Mỗi 5 giây: log ba nhiệt độ và OPEN/CLOSED của Grid.
-- Grid: controller nhận cả trạng thái attribute và StateChange khi tiếp điểm đổi trạng thái.
-- Tên/UniqueID: phân biệt được AC Temperature, DC Temperature, Battery Temperature, Grid; không đổi định danh sau reboot.
-- Metadata: manufacturer theo tên project, model theo target, serial có MAC và hậu tố riêng.
-- Reboot: controller kết nối lại; giá trị mô phỏng bắt đầu lại từ 32/36/28 °C.
-- Factory reset: pair lại được từ đầu.
+Đã kiểm chứng bản Modbus ngày 2026-11-01: native Windows build, flash COM3,
+23 tests pass (gồm C++ native), 5 kênh EPM encode được số đo thật. Thử mất logger
+và khôi phục trong cùng phiên USB xác nhận null/unreachable rồi tự phục hồi,
+không reboot, không phát Grid outage giả; cấu hình local và pairing được giữ.
+Ba vòng CLI đọc thật mất 672/500/485 ms; đây là số quan sát, không phải cam kết
+hiệu năng. Log local bị ignore: `.local/deye.jsonl`, bảng đối chiếu
+`.local/deye-readings.md`. Chưa đối chiếu dòng AC với màn hình inverter.
 
 Tham khảo [ESP-Matter release/v1.4](https://github.com/espressif/esp-matter/tree/release/v1.4)
 và [hướng dẫn phát triển Espressif](https://docs.espressif.com/projects/esp-matter/en/release-v1.4/esp32/developing.html).

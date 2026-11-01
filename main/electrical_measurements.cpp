@@ -6,7 +6,6 @@
 #include <memory>
 
 #include <esp_log.h>
-#include <esp_random.h>
 #include <app/AttributeAccessInterfaceRegistry.h>
 #include <app/AttributeValueEncoder.h>
 #include <app/util/attribute-table.h>
@@ -25,22 +24,22 @@ struct Profile {
     const char *key;
     uint16_t endpoint;
     bool ac;
-    int64_t minimum_mv;
-    int64_t maximum_mv;
-    int64_t minimum_ma;
-    int64_t maximum_ma;
-    int64_t initial_mv;
-    int64_t initial_ma;
-    bool grid_dependent = false;
+    deye::Index voltage;
+    deye::Index current;
+    deye::Index power;
 };
 
 class Channel final : public epm::Delegate {
 public:
-    explicit Channel(Profile profile) : profile_(profile), voltage_(profile.initial_mv), current_(profile.initial_ma)
+    explicit Channel(Profile profile) : profile_(profile)
     {
-        // Accuracy describes synthetic values, not the accuracy of real hardware.
-        const int64_t minima[] = {0, profile.minimum_ma, profile.maximum_mv * profile.minimum_ma / 1000};
-        const int64_t maxima[] = {profile.maximum_mv, profile.maximum_ma, profile.maximum_mv * profile.maximum_ma / 1000};
+        // Register representation bounds, not a claim of calibrated accuracy.
+        const auto &v = deye::METRICS[profile.voltage];
+        const auto &i = deye::METRICS[profile.current];
+        const auto &p = deye::METRICS[profile.power];
+        const int64_t minima[] = {0, i.is_signed ? -32768LL * i.multiplier : 0, p.is_signed ? -32768LL * p.multiplier : 0};
+        const int64_t maxima[] = {65534LL * v.multiplier,
+            (i.is_signed ? 32767LL : 65534LL) * i.multiplier, (p.is_signed ? 32767LL : 65534LL) * p.multiplier};
         const epm::MeasurementTypeEnum types[] = {
             epm::MeasurementTypeEnum::kVoltage,
             epm::MeasurementTypeEnum::kActiveCurrent,
@@ -49,9 +48,11 @@ public:
         for (size_t i = 0; i < 3; ++i) {
             ranges_[i].rangeMin = minima[i];
             ranges_[i].rangeMax = maxima[i];
-            ranges_[i].fixedMax.SetValue(1);
+            // No calibrated logger tolerance is known: advertise only a
+            // conservative full-span bound rather than invented precision.
+            ranges_[i].fixedMax.SetValue(maxima[i] - minima[i]);
             accuracy_[i].measurementType = types[i];
-            accuracy_[i].measured = false;
+            accuracy_[i].measured = true;
             accuracy_[i].minMeasuredValue = minima[i];
             accuracy_[i].maxMeasuredValue = maxima[i];
             accuracy_[i].accuracyRanges = dm::List<const epm::Structs::MeasurementAccuracyRangeStruct::Type>(&ranges_[i], 1);
@@ -82,8 +83,8 @@ public:
         auto *power = cluster::electrical_power_measurement::create(endpoint, &measurement, CLUSTER_FLAG_SERVER,
             chip::to_underlying(profile_.ac ? epm::Feature::kAlternatingCurrent : epm::Feature::kDirectCurrent));
         if (!description || !topology_cluster || !power ||
-            !cluster::electrical_power_measurement::attribute::create_voltage(power, voltage_) ||
-            !cluster::electrical_power_measurement::attribute::create_active_current(power, current_)) {
+            !cluster::electrical_power_measurement::attribute::create_voltage(power, nullable<int64_t>()) ||
+            !cluster::electrical_power_measurement::attribute::create_active_current(power, nullable<int64_t>())) {
             ESP_LOGE(TAG, "Cannot create %s ElectricalPowerMeasurement attributes", profile_.name);
             abort();
         }
@@ -116,27 +117,26 @@ public:
             abort();
         }
         verify_reads();
-        log();
+        update(inverter_data::Snapshot{});
     }
 
-    void update(bool grid_connected)
+    void update(const inverter_data::Snapshot &snapshot)
     {
-        if (profile_.grid_dependent && !grid_connected) {
-            voltage_ = 0;
-            current_ = 0;
-        } else {
-            if (voltage_ == 0) {
-                voltage_ = profile_.initial_mv;
-                current_ = profile_.initial_ma;
-            }
-            const int64_t voltage_step = (static_cast<int>(esp_random() % 11) - 5) * 100;
-            const int64_t current_step = (static_cast<int>(esp_random() % 21) - 10) * 100;
-            voltage_ = std::clamp(voltage_ + voltage_step, profile_.minimum_mv, profile_.maximum_mv);
-            current_ = std::clamp(current_ + current_step, profile_.minimum_ma, profile_.maximum_ma);
-        }
+        voltage_ = snapshot.get(profile_.voltage);
+        current_ = snapshot.get(profile_.current);
+        power_ = snapshot.get(profile_.power);
         // Delegate-backed values must dirty the reporting engine explicitly.
         for (auto id : {epm::Attributes::Voltage::Id, epm::Attributes::ActiveCurrent::Id, epm::Attributes::ActivePower::Id}) {
             MatterReportingAttributeChangeCallback(profile_.endpoint, epm::Id, id);
+        }
+        auto reachable = esp_matter_bool(voltage_.has_value() && current_.has_value() && power_.has_value());
+        ESP_ERROR_CHECK(esp_matter::attribute::update(profile_.endpoint,
+            chip::app::Clusters::BridgedDeviceBasicInformation::Id,
+            chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::Reachable::Id, &reachable));
+        if (!verified_live_ && voltage_ && current_ && power_) {
+            verify_reads();
+            verified_live_ = true;
+            ESP_LOGI(TAG, "POWER %s live Modbus values passed Matter read/encoding", profile_.name);
         }
         log();
     }
@@ -160,9 +160,9 @@ public:
     CHIP_ERROR StartHarmonicPhasesRead() override { return CHIP_NO_ERROR; }
     CHIP_ERROR GetHarmonicPhasesByIndex(uint8_t, epm::Structs::HarmonicMeasurementStruct::Type &) override { return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED; }
     CHIP_ERROR EndHarmonicPhasesRead() override { return CHIP_NO_ERROR; }
-    Reading GetVoltage() override { return dm::MakeNullable(voltage_); }
-    Reading GetActiveCurrent() override { return dm::MakeNullable(current_); }
-    Reading GetActivePower() override { return dm::MakeNullable(voltage_ * current_ / 1000); }
+    Reading GetVoltage() override { return voltage_ ? dm::MakeNullable(*voltage_) : Reading(); }
+    Reading GetActiveCurrent() override { return current_ ? dm::MakeNullable(*current_) : Reading(); }
+    Reading GetActivePower() override { return power_ ? dm::MakeNullable(*power_) : Reading(); }
     Reading GetReactiveCurrent() override { return Reading(); }
     Reading GetApparentCurrent() override { return Reading(); }
     Reading GetReactivePower() override { return Reading(); }
@@ -178,7 +178,7 @@ private:
     CHIP_ERROR encode_read(chip::AttributeId id)
     {
         // Exercise the same AAI/encoder used by an actual Matter read, not just
-        // the simulated getters. This catches incorrect optional masks or lists.
+        // the getters. This catches incorrect optional masks or lists.
         uint8_t buffer[512];
         chip::TLV::TLVWriter writer;
         writer.Init(buffer);
@@ -216,24 +216,32 @@ private:
 
     void log() const
     {
-        ESP_LOGI(TAG, "POWER %s endpoint=%u mode=%s voltage=%.3f V current=%.3f A power=%.3f W (simulated)",
+        char voltage[32], current[32], power[32];
+        auto format = [](char *buffer, const std::optional<int64_t> &value) {
+            if (value) std::snprintf(buffer, 32, "%.3f", *value / 1000.0);
+            else std::strcpy(buffer, "null");
+        };
+        format(voltage, voltage_); format(current, current_); format(power, power_);
+        ESP_LOGI(TAG, "POWER %s endpoint=%u mode=%s voltage=%s V current=%s A power=%s W (Modbus)",
             profile_.name, profile_.endpoint, profile_.ac ? "AC" : "DC",
-            voltage_ / 1000.0, current_ / 1000.0, (voltage_ * current_ / 1000) / 1000.0);
+            voltage, current, power);
     }
     Profile profile_;
-    int64_t voltage_;
-    int64_t current_;
+    std::optional<int64_t> voltage_;
+    std::optional<int64_t> current_;
+    std::optional<int64_t> power_;
+    bool verified_live_ = false;
     epm::Structs::MeasurementAccuracyRangeStruct::Type ranges_[3];
     epm::Structs::MeasurementAccuracyStruct::Type accuracy_[3];
     std::unique_ptr<epm::Instance> instance_;
 };
 
 Channel channels[] = {
-    Channel({"PV1 Power", "PV1Pwr", 7, false, 250000, 450000, 0, 12000, 320000, 5000}),
-    Channel({"PV2 Power", "PV2Pwr", 8, false, 250000, 450000, 0, 12000, 340000, 4000}),
-    Channel({"Grid Power", "GridPwr", 9, true, 220000, 240000, -10000, 10000, 230000, 3500, true}),
-    Channel({"Battery Power", "BatPwr", 10, false, 48000, 56000, -30000, 30000, 51200, -5000}),
-    Channel({"Load Power", "LoadPwr", 11, true, 220000, 240000, 0, 20000, 230000, 5000}),
+    Channel({"PV1 Power", "PV1Pwr", 7, false, deye::pv1VoltageV, deye::pv1CurrentA, deye::pv1PowerW}),
+    Channel({"PV2 Power", "PV2Pwr", 8, false, deye::pv2VoltageV, deye::pv2CurrentA, deye::pv2PowerW}),
+    Channel({"Grid Power", "GridPwr", 9, true, deye::gridVoltageV, deye::gridCurrentA, deye::gridPowerW}),
+    Channel({"Battery Power", "BatPwr", 10, false, deye::batteryVoltageV, deye::batteryCurrentA, deye::batteryPowerW}),
+    Channel({"Load Power", "LoadPwr", 11, true, deye::loadVoltageV, deye::loadCurrentA, deye::loadPowerW}),
 };
 esp_matter::endpoint_t *retired_slot = nullptr;
 } // namespace
@@ -260,8 +268,8 @@ void start(esp_matter::node_t *node)
     for (auto &channel : channels) channel.start();
 }
 
-void update(bool grid_connected)
+void update(const inverter_data::Snapshot &snapshot)
 {
-    for (auto &channel : channels) channel.update(grid_connected);
+    for (auto &channel : channels) channel.update(snapshot);
 }
 } // namespace electrical_measurements

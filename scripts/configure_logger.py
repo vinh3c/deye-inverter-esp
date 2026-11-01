@@ -39,7 +39,7 @@ def main():
         port.port = args.port
         port.open()
         apply_config(port, args.host, args.logger_port)
-    print(f"Logger config saved and read back: {args.host}:{args.logger_port} (simulation still active)")
+    print(f"Logger config saved and read back: {args.host}:{args.logger_port}")
 
 
 if __name__ == "__main__":

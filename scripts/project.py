@@ -261,20 +261,32 @@ def configure_logger(port, settings):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["targets", "test", "bootstrap", "build", "menuconfig", "clean", "ports", "flash", "deploy", "monitor", "dev", "config", "erase-flash"])
+    parser.add_argument("command", choices=["targets", "test", "bootstrap", "build", "menuconfig", "clean", "ports", "flash", "deploy", "monitor", "dev", "config", "read", "erase-flash"])
     parser.add_argument("--target", choices=TARGETS, default=DEFAULT_TARGET)
     parser.add_argument("--build-dir", type=Path)
     parser.add_argument("--port", help="COM3, /dev/cu.usbmodem*, or /dev/ttyACM0")
     parser.add_argument("--baud", type=int, default=460800, help="flash baud rate (monitor uses 115200)")
-    parser.add_argument("--config", type=Path, help="logger JSON for flash/deploy/dev/config; defaults to config.local.json if present")
+    parser.add_argument("--config", type=Path, help="logger JSON for flash/deploy/dev/config/read; defaults to config.local.json if present")
+    parser.add_argument("--host", help="read: override logger host")
+    parser.add_argument("--logger-port", type=int, help="read: override TCP port")
+    parser.add_argument("--unit-id", type=int, default=1, help="read: Modbus unit ID (default 1)")
+    parser.add_argument("--timeout", type=float, default=3, help="read: per-request timeout in seconds")
+    observation = parser.add_mutually_exclusive_group()
+    observation.add_argument("--once", action="store_true", help="read: one snapshot (default)")
+    observation.add_argument("--watch", action="store_true", help="read: continuous foreground polling; Ctrl+C to stop")
+    observation.add_argument("--count", type=int, default=1, help="read: finite number of snapshots")
+    parser.add_argument("--interval", type=float, default=5, help="read: seconds after each completed cycle")
+    parser.add_argument("--grid-only", action="store_true", help="read: only Grid voltage register 150")
+    parser.add_argument("--json", action="store_true", help="read: JSONL to stdout instead of summary")
+    parser.add_argument("--log", type=Path, default=ROOT / ".local/deye.jsonl", help="read: append complete JSONL diagnostics here")
     args = parser.parse_args()
     if sys.version_info[:2] != (3, 11):
         parser.error("Use Python 3.11: uv run fw " + args.command)
     if args.command in ("flash", "deploy", "monitor", "dev", "config", "erase-flash") and not args.port:
         parser.error("--port is required; use the ports command to list devices")
-    config_commands = ("flash", "deploy", "dev", "config")
+    config_commands = ("flash", "deploy", "dev", "config", "read")
     if args.config and args.command not in config_commands:
-        parser.error("--config is only supported by flash/deploy/dev/config")
+        parser.error("--config is only supported by flash/deploy/dev/config/read")
     settings = None
     if args.command in config_commands:
         config_path = args.config or ROOT / "config.local.json"
@@ -282,11 +294,13 @@ def main():
             settings = load_logger_config(config_path.expanduser().resolve())
         elif args.command == "config":
             parser.error("Provide --config or create config.local.json from config.example.json")
+        elif args.command == "read" and not args.host:
+            parser.error("Provide --host, --config, or config.local.json")
     build_dir = (args.build_dir or (ROOT / "build" / args.target / BUILD.name)).expanduser().resolve()
     if args.command == "targets":
         print(json.dumps(list(TARGETS)))
     elif args.command == "test":
-        run([sys.executable, ROOT / "scripts/test_project.py"])
+        run([sys.executable, "-m", "unittest", "discover", "-s", ROOT / "scripts", "-p", "test_*.py"])
     elif args.command == "bootstrap":
         bootstrap(args.target)
     elif args.command == "ports":
@@ -295,6 +309,9 @@ def main():
         serial_command("esptool", ["--chip", TARGETS[args.target]["idf_target"], "--port", args.port, "erase_flash"])
     elif args.command == "config":
         configure_logger(args.port, settings)
+    elif args.command == "read":
+        from scripts.modbus import run_read
+        run_read(args, settings or (args.host, 502))
     else:
         if args.command in ("build", "deploy", "dev", "menuconfig", "clean"):
             idf({"menuconfig": "menuconfig", "clean": "clean"}.get(args.command, "build"), build_dir, args.target)
