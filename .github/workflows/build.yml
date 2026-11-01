@@ -1,0 +1,58 @@
+name: Native firmware
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022, macos-15, macos-15-intel]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.17'
+          python-version: '3.11.13'
+      - name: Linux native prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y git cmake ninja-build flex bison gperf libffi-dev libssl-dev libusb-1.0-0
+      - name: Test development tools
+        run: uv run --python 3.11 scripts/test_project.py
+      - name: Install native SDK
+        run: uv run --python 3.11 scripts/project.py bootstrap
+      - name: Build firmware
+        run: uv run --python 3.11 scripts/project.py build --build-dir build/firmware
+      - name: Upload flashable firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            build/firmware/*.bin
+            build/firmware/*.elf
+            build/firmware/flasher_args.json
+            build/firmware/bootloader/bootloader.bin
+            build/firmware/partition_table/partition-table.bin
+            build/firmware/sdkconfig
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ matrix.os }}
+          if-no-files-found: ignore
+          path: |
+            build/firmware/log/
+            build/firmware/esp-idf/chip/args.gn

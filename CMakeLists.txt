@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.16)
 
 if(NOT DEFINED ENV{ESP_MATTER_PATH})
-    message(FATAL_ERROR "Source esp-matter/export.sh first (see README.md)")
+    message(FATAL_ERROR "Run uv run --python 3.11 scripts/project.py build (see README.md)")
 endif()
 set(IDF_TARGET esp32c3)
 set(PROJECT_VER "0.1.0")
 set(PROJECT_VER_NUMBER 1)
-set(ESP_MATTER_PATH "$ENV{ESP_MATTER_PATH}")
+file(TO_CMAKE_PATH "$ENV{ESP_MATTER_PATH}" ESP_MATTER_PATH)
 set(MATTER_SDK_PATH "${ESP_MATTER_PATH}/connectedhomeip/connectedhomeip")
 # ESP Insights is pulled in by CHIP's manifest and omits this dependency itself.
 set(COMPONENTS main esp_http_client)

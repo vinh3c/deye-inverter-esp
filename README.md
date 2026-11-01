@@ -9,47 +9,125 @@ SDK được chốt: ESP-IDF **v5.4.1**, Python **3.11**, ESP-Matter release/v1.
 `abdb759d7aae8a445e3edc5769a10f5cb23feffc`. Board cần flash tối thiểu **4 MB**.
 ESP32-C3 dùng Matter qua Wi-Fi 2.4 GHz, BLE dùng cho commissioning.
 
-## Build trên Windows + Ubuntu WSL
+## Native build: Windows, macOS và Linux
 
-Trong PowerShell, ở thư mục project:
+Dùng cùng `scripts/project.py` trên cả ba hệ điều hành, không cần Docker hay WSL.
+Python gọi trực tiếp trình cài toolchain và `idf.py` của ESP-IDF, không phụ thuộc
+`apt`, `install.sh` hoặc thao tác source shell để cài SDK.
 
-```powershell
-wsl -d Ubuntu -- bash /mnt/c/Users/vdvin/Source/deye-inverter-esp/scripts/bootstrap.sh
-wsl -d Ubuntu -- bash /mnt/c/Users/vdvin/Source/deye-inverter-esp/scripts/build.sh
+Chuẩn bị:
+
+- Cài [Git](https://git-scm.com/downloads) và [uv](https://docs.astral.sh/uv/getting-started/installation/).
+- Windows x64: dùng PowerShell và Git for Windows. Nên clone vào đường dẫn ngắn,
+  ví dụ `C:\src\deye-inverter-esp`.
+- macOS Intel/Apple Silicon: cài Command Line Tools bằng `xcode-select --install`.
+- Linux x64/arm64: cài công cụ hệ thống. Với Ubuntu/Debian:
+
+  ```sh
+  sudo apt-get update
+  sudo apt-get install -y git cmake ninja-build flex bison gperf libffi-dev libssl-dev libusb-1.0-0
+  ```
+
+Đường dẫn project và SDK không được chứa khoảng trắng vì giới hạn xử lý compile
+flags của SDK này. Bootstrap cần Internet và vài GB dung lượng trống.
+
+Trong thư mục project, chạy giống nhau từ PowerShell, bash hoặc zsh:
+
+```sh
+uv run --python 3.11 scripts/project.py bootstrap
+uv run --python 3.11 scripts/project.py build
 ```
 
-Lần đầu bootstrap sẽ cài các gói Ubuntu, tải SDK và toolchain, cần Internet và
-vài GB trống. SDK nằm trong `~/esp` của WSL; đổi bằng `ESP_SDK_ROOT` nếu cần.
-Bootstrap chỉ cài công cụ cần cho firmware (GN và dependency Python), bỏ qua bộ host
-ARM/Clang/QEMU và chip-tool. Python 3.11 được cài riêng, không thay Python hệ thống.
-Trên Linux có thể chạy trực tiếp `bash scripts/bootstrap.sh` rồi `bash scripts/build.sh`.
-Build tạo `build/deye_matter_switch.bin`, bootloader, partition table và `flasher_args.json`.
-Đây là partition ứng dụng đơn, không có OTA; flash qua USB.
+uv tự chọn/cài Python 3.11, không thay Python hệ thống. SDK được chốt phiên bản
+trong `.tools/sdk`; biến môi trường `ESP_SDK_ROOT` cho phép chọn nơi khác.
+Trên Windows có thể đặt `$env:ESP_SDK_ROOT = 'C:\esp\deye-sdk'` để rút ngắn đường dẫn;
+trên macOS/Linux dùng `export ESP_SDK_ROOT="$HOME/esp/deye-sdk"`.
+Đặt cùng giá trị này cho các lần bootstrap/build tiếp theo. Không trỏ vào SDK phiên
+bản khác; công cụ sẽ từ chối checkout khác phiên bản.
 
-## Flash và xem log
+Trên Windows, bootstrap tự thay các symlink cần cho Matter bằng junction/bản sao
+và cài adapter chuyển compile flags CMake sang GN trong checkout SDK đã chốt.
+Không cần bật Developer Mode hay chạy shell với quyền Administrator.
+Compiler ESP32-C3, CMake, Ninja và GN đều dùng bản Windows native.
 
-Windows cần Python và [uv](https://docs.astral.sh/uv/). Dùng đúng COM của board:
+Build nằm trong `build/native-<platform>-<architecture>/`, tách riêng từng host để
+không tái sử dụng CMake cache của WSL hay máy khác. Có thể chọn rõ đường dẫn:
 
-```powershell
-.\scripts\flash.ps1 -Port COM3
-uv run --with pyserial python -m serial.tools.miniterm COM3 115200
+```sh
+uv run --python 3.11 scripts/project.py build --build-dir build/firmware
 ```
 
-`flash.ps1` dùng esptool 4.8.1 và offset do build sinh, không cần chuyển USB vào WSL.
+Kết quả có `deye_matter_switch.bin`, bootloader, partition table và `flasher_args.json`.
+Đây là partition ứng dụng đơn, không có OTA; deploy là build rồi flash qua USB.
+Không dùng lại thư mục `build/` gốc của luồng WSL cũ.
+
+## Dev, deploy và xem log
+
+Liệt kê cổng USB rồi chọn đúng cổng của board:
+
+```sh
+uv run --python 3.11 scripts/project.py ports
+```
+
+| Hệ điều hành | Ví dụ `--port` |
+| --- | --- |
+| Windows | `COM3` |
+| macOS | `/dev/cu.usbmodem1101` |
+| Linux | `/dev/ttyACM0` hoặc `/dev/ttyUSB0` |
+
+Các lệnh dưới đây dùng ví dụ Windows; thay `COM3` bằng cổng vừa tìm trên máy:
+
+```sh
+# Build + flash
+uv run --python 3.11 scripts/project.py deploy --port COM3
+# Build + flash + monitor
+uv run --python 3.11 scripts/project.py dev --port COM3
+# Flash firmware đã build; không cần cài SDK
+uv run --python 3.11 scripts/project.py flash --port COM3
+# Chỉ xem log
+uv run --python 3.11 scripts/project.py monitor --port COM3
+```
+
+Nếu dùng `--build-dir`, truyền cùng thư mục cho build, menuconfig, deploy và flash.
+Flash dùng esptool 4.8.1 và offset do build sinh; monitor dùng baud 115200.
 Nếu không kết nối được, giữ BOOT, bấm RESET, thả BOOT rồi flash lại.
 Miniterm thoát bằng Ctrl+]; đóng monitor trước khi flash.
+Trên Linux, tài khoản cần quyền truy cập serial (Ubuntu thường là nhóm `dialout`).
 
 Mặc định console là **USB Serial/JTAG**, phù hợp cổng USB native của C3.
-Nếu board dùng chip USB-UART ngoài (CH340/CP210x), chạy menuconfig rồi chọn UART0:
+Nếu board dùng chip USB-UART ngoài (CH340/CP210x), chọn UART0 trong menuconfig:
 
-```bash
-export PATH="$HOME/esp/python311/bin:$HOME/esp/gn:$PATH"
-source ~/esp/esp-idf/export.sh
-source ~/esp/esp-matter/export.sh
-idf.py menuconfig
+```sh
+uv run --python 3.11 scripts/project.py menuconfig
 # Component config -> ESP System Settings -> Channel for console output
-idf.py build
+uv run --python 3.11 scripts/project.py build
 ```
+
+`sdkconfig` nằm trong thư mục build đã chọn; `sdkconfig.defaults` là cấu hình chung
+được commit. Lệnh `clean` dọn kết quả biên dịch bằng `idf.py clean` và giữ cấu hình.
+Các script `bootstrap.sh`, `build.sh` và `flash.ps1` là
+wrapper tương thích gọi bộ lệnh Python này.
+
+## GitHub Actions
+
+Workflow [Native firmware](.github/workflows/build.yml) chạy trên push, pull request
+và workflow_dispatch. Mỗi job cài SDK và build trực tiếp trên runner tương ứng:
+Windows x64, Ubuntu x64, macOS Intel và Apple Silicon. Không dùng container hay WSL.
+Các kiểm tra công cụ cũng chạy bằng `uv run --python 3.11 scripts/test_project.py`.
+
+Đã xác minh build firmware native trên Windows x64, gồm GN, link và kiểm tra dung
+lượng partition. Các job macOS/Linux được cấu hình trong workflow; cần chạy workflow
+trên GitHub để xác nhận kết quả trên những runner này.
+
+Sau khi job thành công, tải artifact `firmware-<runner>`, giải nén và flash trực tiếp
+trên máy có USB, không cần bootstrap SDK:
+
+```sh
+uv run --python 3.11 scripts/project.py flash --build-dir path/to/extracted-firmware --port COM3
+```
+
+Giữ nguyên cấu trúc `bootloader/`, `partition_table/`, các `.bin` và `flasher_args.json`
+khi giải nén. Firmware CI chạy trên cùng ESP32-C3 dù được build từ hệ điều hành nào.
 
 ## Pair và sử dụng
 
@@ -107,18 +185,12 @@ nếu còn lưu. Khi xóa fabric cuối từ controller, firmware mở cửa s�
 300 giây trên mạng Wi-Fi hiện tại (DNS-SD). Để thêm hệ sinh thái thứ hai khi vẫn còn
 fabric, dùng chức năng chia sẻ thiết bị Matter của controller đang quản lý.
 
-Nếu console không dùng được và cần xóa sạch flash, trong WSL đã export SDK:
+Nếu console không dùng được và cần xóa sạch flash, đóng monitor rồi chạy
+(thay `COM3` bằng cổng của board; lệnh này xóa cả Wi-Fi và fabric):
 
-```bash
-# Chỉ khi board đã được chuyển USB vào WSL và có /dev/ttyACM0 hoặc /dev/ttyUSB0:
-idf.py -p /dev/ttyACM0 erase-flash flash monitor
-```
-
-Hoặc trên Windows, sau khi đóng monitor:
-
-```powershell
-uv run --with 'esptool==4.8.1' python -m esptool --chip esp32c3 --port COM3 erase_flash
-.\scripts\flash.ps1 -Port COM3
+```sh
+uv run --python 3.11 scripts/project.py erase-flash --port COM3
+uv run --python 3.11 scripts/project.py flash --port COM3
 ```
 
 ## Kiểm tra trên board
