@@ -1,9 +1,10 @@
-# ESP32-C3 Matter temperature sensors (draft)
+# ESP32-C3 Matter sensors (draft)
 
 Firmware nháp ESP-Matter: một thiết bị Wi-Fi, ba cảm biến nhiệt độ giả lập
 **AC**, **DC**, **Battery**. Mỗi cảm biến là một Temperature Sensor (0x0302), có
-cluster Temperature Measurement (0x0402), NodeLabel và UniqueID riêng.
-Endpoint 0 là Root Node; một aggregator gom ba sensor con theo mô hình Matter bridge.
+cluster Temperature Measurement (0x0402), NodeLabel và UniqueID riêng. Có thêm
+Contact Sensor **Grid** (0x0015), dùng Boolean State (0x0045).
+Endpoint 0 là Root Node; một aggregator gom bốn sensor con theo mô hình Matter bridge.
 Switch mẫu đã được bỏ. Không cần cảm biến vật lý, relay hay GPIO ngoài.
 
 | Sensor | Nhiệt độ ban đầu | Khoảng giả lập |
@@ -16,6 +17,14 @@ Cứ **5 giây**, mỗi giá trị tăng/giảm ngẫu nhiên tối đa 0,50 °C
 khoảng trên. Giá trị dùng đơn vị 0,01 °C theo Matter; cập nhật trên Matter thread
 để controller nhận qua subscription. Đây chỉ là dữ liệu mô phỏng; AC/DC/Battery
 đều là nhiệt độ, chưa có đo điện áp, dòng điện hoặc mức pin.
+
+Grid bắt đầu ở trạng thái **CLOSED**, sau đó chọn ngẫu nhiên OPEN/CLOSED mỗi 5 giây.
+`StateValue=true` là CLOSED, `false` là OPEN theo
+[quy ước Contact Sensor của Espressif](https://docs.espressif.com/projects/arduino-esp32/en/latest/matter/ep_contact_sensor.html).
+Mỗi lần đổi trạng thái, firmware cập nhật attribute và phát event StateChange để
+controller nhận thay đổi. Đây là contact giả lập, chưa đọc tín hiệu điện lưới thực.
+Grid có NodeLabel/UniqueID riêng và được thêm sau ba sensor nhiệt độ để giữ nguyên
+endpoint/định danh AC, DC, Battery.
 
 SDK được chốt: ESP-IDF **v5.4.1**, Python **3.11**, ESP-Matter release/v1.4 commit
 `abdb759d7aae8a445e3edc5769a10f5cb23feffc`. Board cần flash tối thiểu **4 MB**.
@@ -163,15 +172,16 @@ khi giải nén. Firmware CI chạy trên cùng ESP32-C3 dù được build từ
 3. Chọn thêm thiết bị Matter, nhập manual code hoặc quét QR từ payload trong log.
    Cấu hình thử nghiệm mặc định dùng passcode `20202021`, discriminator `3840`.
    Passcode này dành cho chip-tool; app điện thoại cần manual pairing code/QR.
-4. Chọn Wi-Fi **2.4 GHz**, chờ `PAIR complete; AC, DC and Battery temperature sensors are ready`.
+4. Chọn Wi-Fi **2.4 GHz**, chờ `PAIR complete; AC, DC, Battery temperatures and Grid contact are ready`.
    Điện thoại/controller và board cần mạng LAN cho phép IPv6, mDNS/multicast;
    tránh mạng guest cô lập client.
-5. Xem ba sensor nhiệt độ trong app; monitor ghi giá trị giả lập mỗi 5 giây, ví dụ:
+5. Xem ba sensor nhiệt độ và contact Grid trong app; monitor ghi giá trị giả lập mỗi 5 giây, ví dụ:
 
 ```text
-deye_temperature: TEMP AC endpoint=2 value=32.15 C (simulated)
-deye_temperature: TEMP DC endpoint=3 value=35.72 C (simulated)
-deye_temperature: TEMP Battery endpoint=4 value=28.04 C (simulated)
+deye_sensors: TEMP AC endpoint=2 value=32.15 C (simulated)
+deye_sensors: TEMP DC endpoint=3 value=35.72 C (simulated)
+deye_sensors: TEMP Battery endpoint=4 value=28.04 C (simulated)
+deye_sensors: CONTACT Grid endpoint=5 state=CLOSED (simulated)
 ```
 
 Endpoint ID thực tế được in ở log boot. Identify cũng ghi log, không nháy LED.
@@ -192,7 +202,7 @@ Với cấu hình mặc định của repo, manual code là **34970112332**;
   trong log (không nhập passcode 8 chữ số `20202021`).
 - Nếu có cảnh báo phụ kiện chưa được chứng nhận, chấp nhận thiết bị phát triển
   để tiếp tục. Chọn phòng, đặt tên bridge ví dụ **Deye Sensors**.
-- Kiểm tra ba sensor AC, DC, Battery và giá trị nhiệt độ thay đổi. Cách gom nhóm,
+- Kiểm tra ba sensor AC, DC, Battery và contact Grid. Cách gom nhóm,
   hiển thị hoặc cho đổi tên từng sensor tùy controller; đối chiếu với log `TEMP`.
 - iOS 18 trở lên có thể thêm và điều khiển Matter cục bộ mà không cần home hub;
   muốn điều khiển từ xa cần home hub. Xem
@@ -201,8 +211,10 @@ Với cấu hình mặc định của repo, manual code là **34970112332**;
 
 ## Pair lại / khôi phục
 
-Khi nâng cấp từ firmware switch cũ sang bản 3 sensor, xóa thiết bị cũ khỏi controller
+Khi nâng cấp từ firmware switch cũ sang bản sensor, xóa thiết bị cũ khỏi controller
 và factory reset rồi pair lại để controller đọc cấu trúc endpoint mới.
+Nếu controller chưa nhận Grid sau khi nâng cấp từ bản ba sensor, thử tải lại danh
+sách phụ kiện của bridge; nếu vẫn thiếu, xóa thiết bị và factory reset/pair lại.
 
 Trong serial console gõ:
 
@@ -225,13 +237,15 @@ uv run fw flash --port COM3
 
 ## Kiểm tra trên board
 
-Bản nháp 3 sensor cần xác minh trên board/controller; các kết quả kiểm tra switch
-trước đây không xác nhận hành vi của mô hình endpoint mới. Checklist:
+Bản bốn sensor đã được build/flash trên ESP32-C3 COM3: log xác nhận AC/DC/Battery
+giữ endpoint 2/3/4, Grid ở endpoint 5 có cả OPEN và CLOSED, cập nhật mỗi 5 giây.
+Pairing được giữ khi flash. Hiển thị Grid trên controller cần xác minh thêm. Checklist:
 
-- Boot chưa pair: log QR/manual code và ba endpoint AC, DC, Battery.
-- Pair: có IP, `PAIR complete`, controller nhận ba temperature sensor và không còn switch.
-- Mỗi 5 giây: log ba giá trị trong đúng khoảng, controller nhận cập nhật nhiệt độ.
-- Tên/UniqueID: phân biệt được AC, DC, Battery; không đổi định danh sau reboot.
+- Boot chưa pair: log QR/manual code và bốn endpoint AC, DC, Battery, Grid.
+- Pair: có IP, `PAIR complete`, controller nhận ba temperature sensor và một contact sensor.
+- Mỗi 5 giây: log ba nhiệt độ trong đúng khoảng và trạng thái OPEN/CLOSED của Grid.
+- Grid: controller nhận cả trạng thái attribute và StateChange khi tiếp điểm đổi trạng thái.
+- Tên/UniqueID: phân biệt được AC, DC, Battery, Grid; không đổi định danh sau reboot.
 - Reboot: controller kết nối lại; giá trị mô phỏng bắt đầu lại từ 32/36/28 °C.
 - Factory reset: pair lại được từ đầu.
 

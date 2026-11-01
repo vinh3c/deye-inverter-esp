@@ -11,12 +11,13 @@
 #include <nvs_flash.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <app/EventLogging.h>
 #include <app/server/CommissioningWindowManager.h>
 #include <app/server/OnboardingCodesUtil.h>
 #include <app/server/Server.h>
 
 namespace {
-constexpr char TAG[] = "deye_temperature";
+constexpr char TAG[] = "deye_sensors";
 constexpr uint32_t UPDATE_INTERVAL_MS = 5000;
 
 // Matter TemperatureMeasurement values are signed hundredths of a degree Celsius.
@@ -34,7 +35,15 @@ Sensor sensors[] = {
     {"Battery", 2000, 4500, 2800, 0},
 };
 
-void update_temperatures(intptr_t)
+struct ContactSensor {
+    char name[8];
+    bool closed;
+    uint16_t endpoint;
+};
+
+ContactSensor grid{"Grid", true, 0};
+
+void update_sensors(intptr_t)
 {
     using namespace chip::app::Clusters;
     // ScheduleWork runs on the Matter thread, where attribute updates are safe.
@@ -53,17 +62,66 @@ void update_temperatures(intptr_t)
             ESP_LOGE(TAG, "TEMP %s update failed: %s", sensor.name, esp_err_to_name(error));
         }
     }
+
+    // For a Matter Contact Sensor, true means closed/contact; false means open.
+    const bool closed = (esp_random() & 1u) != 0;
+    auto value = esp_matter_bool(closed);
+    const esp_err_t error = esp_matter::attribute::update(grid.endpoint,
+        BooleanState::Id, BooleanState::Attributes::StateValue::Id, &value);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "CONTACT Grid update failed: %s", esp_err_to_name(error));
+        return;
+    }
+    const bool changed = closed != grid.closed;
+    grid.closed = closed;
+    if (changed) {
+        chip::EventNumber event_number;
+        BooleanState::Events::StateChange::Type event{closed};
+        const auto event_error = chip::app::LogEvent(event, grid.endpoint, event_number);
+        if (event_error != CHIP_NO_ERROR) {
+            ESP_LOGE(TAG, "CONTACT Grid event failed: %s", event_error.AsString());
+        }
+    }
+    ESP_LOGI(TAG, "CONTACT Grid endpoint=%u state=%s (simulated)",
+             grid.endpoint, grid.closed ? "CLOSED" : "OPEN");
 }
 
 void simulation_task(void *)
 {
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(UPDATE_INTERVAL_MS));
-        const auto error = chip::DeviceLayer::PlatformMgr().ScheduleWork(update_temperatures, 0);
+        const auto error = chip::DeviceLayer::PlatformMgr().ScheduleWork(update_sensors, 0);
         if (error != CHIP_NO_ERROR) {
-            ESP_LOGE(TAG, "Cannot schedule temperature update: %s", error.AsString());
+            ESP_LOGE(TAG, "Cannot schedule sensor update: %s", error.AsString());
         }
     }
+}
+
+void attach_to_bridge(esp_matter::endpoint_t *sensor_endpoint, esp_matter::endpoint_t *bridge,
+                      char *name, const uint8_t (&mac)[6])
+{
+    using namespace esp_matter;
+    if (!sensor_endpoint) {
+        ESP_LOGE(TAG, "Cannot create %s sensor", name);
+        abort();
+    }
+    endpoint::bridged_node::config_t bridged_config{};
+    ESP_ERROR_CHECK(endpoint::bridged_node::add(sensor_endpoint, &bridged_config));
+    ESP_ERROR_CHECK(endpoint::set_parent_endpoint(sensor_endpoint, bridge));
+    auto *basic = cluster::get(sensor_endpoint, chip::app::Clusters::BridgedDeviceBasicInformation::Id);
+    char unique_id[33];
+    std::snprintf(unique_id, sizeof(unique_id), "deye-%02x%02x%02x%02x%02x%02x-%.7s",
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], name);
+    if (!basic || !cluster::bridged_device_basic_information::attribute::create_node_label(
+                      basic, name, std::strlen(name))) {
+        ESP_LOGE(TAG, "Cannot set %s sensor identity", name);
+        abort();
+    }
+    // bridged_node::add already creates UniqueID; set its value instead of
+    // calling create again (which would leave the existing empty value intact).
+    auto *id = attribute::get(basic, chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::UniqueID::Id);
+    auto id_value = esp_matter_char_str(unique_id, std::strlen(unique_id));
+    ESP_ERROR_CHECK(attribute::set_val(id, &id_value));
 }
 
 void create_sensor(esp_matter::node_t *node, esp_matter::endpoint_t *bridge, Sensor &sensor,
@@ -75,31 +133,28 @@ void create_sensor(esp_matter::node_t *node, esp_matter::endpoint_t *bridge, Sen
     config.temperature_measurement.min_measured_value = sensor.minimum;
     config.temperature_measurement.max_measured_value = sensor.maximum;
     auto *sensor_endpoint = endpoint::temperature_sensor::create(node, &config, ENDPOINT_FLAG_NONE, nullptr);
-    if (!sensor_endpoint) {
-        ESP_LOGE(TAG, "Cannot create %s sensor", sensor.name);
-        abort();
-    }
-    endpoint::bridged_node::config_t bridged_config{};
-    ESP_ERROR_CHECK(endpoint::bridged_node::add(sensor_endpoint, &bridged_config));
-    ESP_ERROR_CHECK(endpoint::set_parent_endpoint(sensor_endpoint, bridge));
-    auto *basic = cluster::get(sensor_endpoint, chip::app::Clusters::BridgedDeviceBasicInformation::Id);
-    char unique_id[33];
-    std::snprintf(unique_id, sizeof(unique_id), "deye-%02x%02x%02x%02x%02x%02x-%.7s",
-                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], sensor.name);
-    if (!basic || !cluster::bridged_device_basic_information::attribute::create_node_label(
-                      basic, sensor.name, std::strlen(sensor.name))) {
-        ESP_LOGE(TAG, "Cannot set %s sensor identity", sensor.name);
-        abort();
-    }
-    // bridged_node::add already creates UniqueID; set its value instead of
-    // calling create again (which would leave the existing empty value intact).
-    auto *id = attribute::get(basic, chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::UniqueID::Id);
-    auto id_value = esp_matter_char_str(unique_id, std::strlen(unique_id));
-    ESP_ERROR_CHECK(attribute::set_val(id, &id_value));
+    attach_to_bridge(sensor_endpoint, bridge, sensor.name, mac);
     sensor.endpoint = endpoint::get_id(sensor_endpoint);
     ESP_LOGI(TAG, "TEMP %s endpoint=%u initial=%.2f C range=%.2f..%.2f C (simulated)",
              sensor.name, sensor.endpoint, sensor.temperature / 100.0,
              sensor.minimum / 100.0, sensor.maximum / 100.0);
+}
+
+void create_grid_sensor(esp_matter::node_t *node, esp_matter::endpoint_t *bridge,
+                        const uint8_t (&mac)[6])
+{
+    using namespace esp_matter;
+    endpoint::contact_sensor::config_t config{};
+    config.boolean_state.state_value = grid.closed;
+    auto *sensor_endpoint = endpoint::contact_sensor::create(node, &config, ENDPOINT_FLAG_NONE, nullptr);
+    attach_to_bridge(sensor_endpoint, bridge, grid.name, mac);
+    auto *state = cluster::get(sensor_endpoint, chip::app::Clusters::BooleanState::Id);
+    if (!cluster::boolean_state::event::create_state_change(state)) {
+        ESP_LOGE(TAG, "Cannot create Grid StateChange event");
+        abort();
+    }
+    grid.endpoint = endpoint::get_id(sensor_endpoint);
+    ESP_LOGI(TAG, "CONTACT Grid endpoint=%u initial=CLOSED (simulated)", grid.endpoint);
 }
 
 esp_err_t on_identify(esp_matter::identification::callback_type_t type, uint16_t endpoint,
@@ -118,7 +173,7 @@ void on_event(const chip::DeviceLayer::ChipDeviceEvent *event, intptr_t)
         ESP_LOGI(TAG, "PAIR session started");
         break;
     case DeviceEventType::kCommissioningComplete:
-        ESP_LOGI(TAG, "PAIR complete; AC, DC and Battery temperature sensors are ready");
+        ESP_LOGI(TAG, "PAIR complete; AC, DC, Battery temperatures and Grid contact are ready");
         break;
     case DeviceEventType::kFailSafeTimerExpired:
         ESP_LOGW(TAG, "PAIR timed out; retry while commissioning window is open");
@@ -179,6 +234,7 @@ extern "C" void app_main()
     for (auto &sensor : sensors) {
         create_sensor(node, bridge, sensor, mac);
     }
+    create_grid_sensor(node, bridge, mac);
     ESP_ERROR_CHECK(esp_matter::start(on_event));
 
     chip::DeviceLayer::PlatformMgr().LockChipStack();
@@ -193,10 +249,10 @@ extern "C" void app_main()
     ESP_ERROR_CHECK(esp_matter::console::init());
 #endif
 
-    if (xTaskCreate(simulation_task, "temperature_sim", 3072, nullptr, 5, nullptr) != pdPASS) {
-        ESP_LOGE(TAG, "Cannot start temperature simulation");
+    if (xTaskCreate(simulation_task, "sensor_sim", 3072, nullptr, 5, nullptr) != pdPASS) {
+        ESP_LOGE(TAG, "Cannot start sensor simulation");
         abort();
     }
-    ESP_LOGI(TAG, "Simulation running: 3 sensors, update every %lu ms",
+    ESP_LOGI(TAG, "Simulation running: 3 temperature sensors + Grid contact, update every %lu ms",
              static_cast<unsigned long>(UPDATE_INTERVAL_MS));
 }
