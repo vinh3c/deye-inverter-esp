@@ -1,9 +1,21 @@
-# ESP32-C3 Matter switch
+# ESP32-C3 Matter temperature sensors (draft)
 
-Firmware ESP-Matter tối thiểu: một thiết bị Wi-Fi, một switch ON/OFF giả lập bằng log.
-Endpoint 0 là Root Node; endpoint ứng dụng dùng **On/Off Plug-in Unit (0x010A)**,
-để controller có thể bật/tắt trực tiếp (thường hiển thị dạng ổ cắm).
-Không cần LED, relay hay GPIO ngoài.
+Firmware nháp ESP-Matter: một thiết bị Wi-Fi, ba cảm biến nhiệt độ giả lập
+**AC**, **DC**, **Battery**. Mỗi cảm biến là một Temperature Sensor (0x0302), có
+cluster Temperature Measurement (0x0402), NodeLabel và UniqueID riêng.
+Endpoint 0 là Root Node; một aggregator gom ba sensor con theo mô hình Matter bridge.
+Switch mẫu đã được bỏ. Không cần cảm biến vật lý, relay hay GPIO ngoài.
+
+| Sensor | Nhiệt độ ban đầu | Khoảng giả lập |
+| --- | --- | --- |
+| AC | 32 °C | 25–55 °C |
+| DC | 36 °C | 30–65 °C |
+| Battery | 28 °C | 20–45 °C |
+
+Cứ **5 giây**, mỗi giá trị tăng/giảm ngẫu nhiên tối đa 0,50 °C, giới hạn trong
+khoảng trên. Giá trị dùng đơn vị 0,01 °C theo Matter; cập nhật trên Matter thread
+để controller nhận qua subscription. Đây chỉ là dữ liệu mô phỏng; AC/DC/Battery
+đều là nhiệt độ, chưa có đo điện áp, dòng điện hoặc mức pin.
 
 SDK được chốt: ESP-IDF **v5.4.1**, Python **3.11**, ESP-Matter release/v1.4 commit
 `abdb759d7aae8a445e3edc5769a10f5cb23feffc`. Board cần flash tối thiểu **4 MB**.
@@ -151,18 +163,20 @@ khi giải nén. Firmware CI chạy trên cùng ESP32-C3 dù được build từ
 3. Chọn thêm thiết bị Matter, nhập manual code hoặc quét QR từ payload trong log.
    Cấu hình thử nghiệm mặc định dùng passcode `20202021`, discriminator `3840`.
    Passcode này dành cho chip-tool; app điện thoại cần manual pairing code/QR.
-4. Chọn Wi-Fi **2.4 GHz**, chờ `PAIR complete; switch is ready`.
+4. Chọn Wi-Fi **2.4 GHz**, chờ `PAIR complete; AC, DC and Battery temperature sensors are ready`.
    Điện thoại/controller và board cần mạng LAN cho phép IPv6, mDNS/multicast;
    tránh mạng guest cô lập client.
-5. Bật/tắt trong app; monitor sẽ ghi:
+5. Xem ba sensor nhiệt độ trong app; monitor ghi giá trị giả lập mỗi 5 giây, ví dụ:
 
 ```text
-matter_switch: SWITCH endpoint=1 state=ON (simulated)
-matter_switch: SWITCH endpoint=1 state=OFF (simulated)
+deye_temperature: TEMP AC endpoint=2 value=32.15 C (simulated)
+deye_temperature: TEMP DC endpoint=3 value=35.72 C (simulated)
+deye_temperature: TEMP Battery endpoint=4 value=28.04 C (simulated)
 ```
 
 Endpoint ID thực tế được in ở log boot. Identify cũng ghi log, không nháy LED.
 Credentials và fabric do SDK lưu trong NVS, không cần pair lại sau mỗi lần reboot.
+Các giá trị mô phỏng bắt đầu lại từ nhiệt độ ban đầu sau reboot, không ghi NVS mỗi chu kỳ.
 Firmware dùng chứng chỉ và VID/PID thử nghiệm; controller có thể yêu cầu chấp nhận
 thiết bị chưa được chứng nhận. Đây là cấu hình phát triển, không dùng để sản xuất.
 
@@ -177,14 +191,18 @@ Với cấu hình mặc định của repo, manual code là **34970112332**;
   hoặc chọn tùy chọn nhập mã thủ công và nhập **manual pairing code 11 chữ số**
   trong log (không nhập passcode 8 chữ số `20202021`).
 - Nếu có cảnh báo phụ kiện chưa được chứng nhận, chấp nhận thiết bị phát triển
-  để tiếp tục. Chọn phòng, đặt tên ví dụ **Deye Switch**.
-- Chạm ô ổ cắm để ON/OFF; kiểm tra log `SWITCH ... state=ON/OFF` trên COM của board.
+  để tiếp tục. Chọn phòng, đặt tên bridge ví dụ **Deye Sensors**.
+- Kiểm tra ba sensor AC, DC, Battery và giá trị nhiệt độ thay đổi. Cách gom nhóm,
+  hiển thị hoặc cho đổi tên từng sensor tùy controller; đối chiếu với log `TEMP`.
 - iOS 18 trở lên có thể thêm và điều khiển Matter cục bộ mà không cần home hub;
   muốn điều khiển từ xa cần home hub. Xem
   [Apple: pair Matter](https://support.apple.com/en-ca/102135) và
   [Apple: điều khiển từ xa](https://support.apple.com/en-gb/102056).
 
 ## Pair lại / khôi phục
+
+Khi nâng cấp từ firmware switch cũ sang bản 3 sensor, xóa thiết bị cũ khỏi controller
+và factory reset rồi pair lại để controller đọc cấu trúc endpoint mới.
 
 Trong serial console gõ:
 
@@ -207,15 +225,14 @@ uv run fw flash --port COM3
 
 ## Kiểm tra trên board
 
-Đã kiểm tra thực tế trên ESP32-C3 revision 0.4, flash 4 MB, COM3:
-build thành công, flash được xác minh hash, boot và factory reset hoạt động,
-pair Apple Home thành công. Các lệnh ON/OFF từ Home đã xuất hiện đúng trong log
-`SWITCH endpoint=1 state=ON/OFF (simulated)`.
+Bản nháp 3 sensor cần xác minh trên board/controller; các kết quả kiểm tra switch
+trước đây không xác nhận hành vi của mô hình endpoint mới. Checklist:
 
-- Boot chưa pair: log QR/manual code và cửa sổ pairing.
-- Pair: có IP, `PAIR complete`, app hiển thị một switch/ổ cắm.
-- ON, OFF, Toggle: trạng thái trong app và log khớp nhau.
-- Reboot: controller kết nối lại, không cần pair lại.
+- Boot chưa pair: log QR/manual code và ba endpoint AC, DC, Battery.
+- Pair: có IP, `PAIR complete`, controller nhận ba temperature sensor và không còn switch.
+- Mỗi 5 giây: log ba giá trị trong đúng khoảng, controller nhận cập nhật nhiệt độ.
+- Tên/UniqueID: phân biệt được AC, DC, Battery; không đổi định danh sau reboot.
+- Reboot: controller kết nối lại; giá trị mô phỏng bắt đầu lại từ 32/36/28 °C.
 - Factory reset: pair lại được từ đầu.
 
 Tham khảo [ESP-Matter release/v1.4](https://github.com/espressif/esp-matter/tree/release/v1.4)
