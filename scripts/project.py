@@ -12,6 +12,8 @@ import urllib.request
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
+TARGETS = json.loads((ROOT / "targets.json").read_text(encoding="utf-8"))
+DEFAULT_TARGET = "esp32-c3"
 IDF_VERSION = "v5.4.1"
 MATTER_REVISION = "abdb759d7aae8a445e3edc5769a10f5cb23feffc"
 GN_REVISION = "05eed8f6252e2dd6b555e0b65192ef03e2c4a276"
@@ -152,7 +154,7 @@ def prepare_environment():
         environment.write_text("# Firmware-only environment; tools are supplied by project.py.\ndeclare_args() {\n}\n", encoding="utf-8")
 
 
-def bootstrap():
+def bootstrap(target=DEFAULT_TARGET):
     if sys.version_info[:2] != (3, 11):
         raise RuntimeError("Use Python 3.11: uv run --python 3.11 scripts/project.py bootstrap")
     for path in (ROOT, SDK):
@@ -168,7 +170,7 @@ def bootstrap():
     env = base_env()
     checkout(IDF, "https://github.com/espressif/esp-idf.git", IDF_VERSION, env)
     run(["git", "-C", IDF, "submodule", "update", "--init", "--recursive", "--depth", "1", "--jobs", "8"], env=env)
-    run([sys.executable, IDF / "tools/idf_tools.py", "install", "--targets", "esp32c3", *sdk_tools], env=env)
+    run([sys.executable, IDF / "tools/idf_tools.py", "install", "--targets", TARGETS[target]["idf_target"], *sdk_tools], env=env)
     run([sys.executable, IDF / "tools/idf_tools.py", "install-python-env", "--features", "core"], env=env)
     checkout(MATTER, "https://github.com/espressif/esp-matter.git", MATTER_REVISION, env)
     run(["git", "-C", MATTER, "submodule", "update", "--init", "--depth", "1"], env=env)
@@ -179,7 +181,7 @@ def bootstrap():
     prepare_environment()
     if WINDOWS:
         windows_compatibility(env)
-    print("Native SDK ready. Run: uv run --python 3.11 scripts/project.py build")
+    print(f"Native SDK ready. Run: uv run --python 3.11 scripts/project.py build --target {target}")
 
 
 def build_env():
@@ -197,9 +199,10 @@ def build_env():
     return env
 
 
-def idf(action, build_dir):
+def idf(action, build_dir, target=DEFAULT_TARGET):
     build_dir.mkdir(parents=True, exist_ok=True)
     run([PYTHON, IDF / "tools/idf.py", "-B", build_dir,
+         "-D", f"IDF_TARGET={TARGETS[target]['idf_target']}",
          "-D", f"SDKCONFIG={(build_dir / 'sdkconfig').as_posix()}",
          "-D", f"Python3_EXECUTABLE={PYTHON.as_posix()}", action], env=build_env())
 
@@ -210,12 +213,16 @@ def serial_command(module, args):
          "--with", "esptool==4.8.1", "--with", "pyserial==3.5", "python", "-m", module, *args])
 
 
-def flash(build_dir, port, baud):
+def flash(build_dir, port, baud, target=DEFAULT_TARGET):
     manifest = build_dir / "flasher_args.json"
     if not manifest.is_file():
         raise RuntimeError(f"No firmware in {build_dir}. Build first or use --build-dir with extracted CI artifacts.")
     data = json.loads(manifest.read_text(encoding="utf-8"))
-    args = ["--chip", "esp32c3", "--port", port, "--baud", str(baud),
+    chip = TARGETS[target]["idf_target"]
+    manifest_chip = data.get("extra_esptool_args", {}).get("chip", chip)
+    if manifest_chip != chip:
+        raise RuntimeError(f"Firmware is for {manifest_chip}, but --target selects {target}.")
+    args = ["--chip", chip, "--port", port, "--baud", str(baud),
             "--before", "default_reset", "--after", "hard_reset", "write_flash",
             *data["write_flash_args"]]
     for offset, name in data["flash_files"].items():
@@ -228,8 +235,9 @@ def flash(build_dir, port, baud):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["bootstrap", "build", "menuconfig", "clean", "ports", "flash", "deploy", "monitor", "dev", "erase-flash"])
-    parser.add_argument("--build-dir", type=Path, default=BUILD)
+    parser.add_argument("command", choices=["targets", "bootstrap", "build", "menuconfig", "clean", "ports", "flash", "deploy", "monitor", "dev", "erase-flash"])
+    parser.add_argument("--target", choices=TARGETS, default=DEFAULT_TARGET)
+    parser.add_argument("--build-dir", type=Path)
     parser.add_argument("--port", help="COM3, /dev/cu.usbmodem*, or /dev/ttyACM0")
     parser.add_argument("--baud", type=int, default=460800, help="flash baud rate (monitor uses 115200)")
     args = parser.parse_args()
@@ -237,18 +245,20 @@ def main():
         parser.error("Use Python 3.11: uv run --python 3.11 scripts/project.py " + args.command)
     if args.command in ("flash", "deploy", "monitor", "dev", "erase-flash") and not args.port:
         parser.error("--port is required; use the ports command to list devices")
-    build_dir = args.build_dir.expanduser().resolve()
-    if args.command == "bootstrap":
-        bootstrap()
+    build_dir = (args.build_dir or (ROOT / "build" / args.target / BUILD.name)).expanduser().resolve()
+    if args.command == "targets":
+        print(json.dumps(list(TARGETS)))
+    elif args.command == "bootstrap":
+        bootstrap(args.target)
     elif args.command == "ports":
         serial_command("serial.tools.list_ports", ["-v"])
     elif args.command == "erase-flash":
-        serial_command("esptool", ["--chip", "esp32c3", "--port", args.port, "erase_flash"])
+        serial_command("esptool", ["--chip", TARGETS[args.target]["idf_target"], "--port", args.port, "erase_flash"])
     else:
         if args.command in ("build", "deploy", "dev", "menuconfig", "clean"):
-            idf({"menuconfig": "menuconfig", "clean": "clean"}.get(args.command, "build"), build_dir)
+            idf({"menuconfig": "menuconfig", "clean": "clean"}.get(args.command, "build"), build_dir, args.target)
         if args.command in ("flash", "deploy", "dev"):
-            flash(build_dir, args.port, args.baud)
+            flash(build_dir, args.port, args.baud, args.target)
         if args.command in ("monitor", "dev"):
             serial_command("serial.tools.miniterm", [args.port, "115200"])
 

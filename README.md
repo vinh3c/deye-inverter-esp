@@ -34,8 +34,8 @@ flags của SDK này. Bootstrap cần Internet và vài GB dung lượng trống
 Trong thư mục project, chạy giống nhau từ PowerShell, bash hoặc zsh:
 
 ```sh
-uv run --python 3.11 scripts/project.py bootstrap
-uv run --python 3.11 scripts/project.py build
+uv run --python 3.11 scripts/project.py bootstrap --target esp32-c3
+uv run --python 3.11 scripts/project.py build --target esp32-c3
 ```
 
 uv tự chọn/cài Python 3.11, không thay Python hệ thống. SDK được chốt phiên bản
@@ -50,16 +50,22 @@ và cài adapter chuyển compile flags CMake sang GN trong checkout SDK đã ch
 Không cần bật Developer Mode hay chạy shell với quyền Administrator.
 Compiler ESP32-C3, CMake, Ninja và GN đều dùng bản Windows native.
 
-Build nằm trong `build/native-<platform>-<architecture>/`, tách riêng từng host để
+Build nằm trong `build/<target>/native-<platform>-<architecture>/`, tách riêng từng target và host để
 không tái sử dụng CMake cache của WSL hay máy khác. Có thể chọn rõ đường dẫn:
 
 ```sh
-uv run --python 3.11 scripts/project.py build --build-dir build/firmware
+uv run --python 3.11 scripts/project.py build --target esp32-c3 --build-dir build/esp32-c3
 ```
 
-Kết quả có `deye_matter_switch.bin`, bootloader, partition table và `flasher_args.json`.
+Kết quả có `esp32-c3.bin`, bootloader, partition table và `flasher_args.json`.
 Đây là partition ứng dụng đơn, không có OTA; deploy là build rồi flash qua USB.
 Không dùng lại thư mục `build/` gốc của luồng WSL cũ.
+
+Tên firmware theo target, không theo hệ điều hành build. `--target` mặc định là
+`esp32-c3`. Danh sách target nằm trong [targets.json](targets.json); lệnh `targets`
+in danh sách JSON để GitHub Actions tạo matrix tự động. Khi thêm target mới, cần
+thêm mapping IDF, cấu hình SDK/hardware phù hợp và xác minh firmware cho chip đó.
+Hiện chỉ có `esp32-c3` được bật; chưa mặc định hỗ trợ các chip khác.
 
 ## Dev, deploy và xem log
 
@@ -111,7 +117,7 @@ wrapper tương thích gọi bộ lệnh Python này.
 ## GitHub Actions
 
 Workflow [Native firmware](.github/workflows/build.yml) chạy trên push, pull request
-và workflow_dispatch. Mỗi job cài SDK và build trực tiếp trên runner tương ứng:
+và workflow_dispatch. Matrix lấy target từ `targets.json`. Mỗi job cài SDK và build trực tiếp trên runner tương ứng:
 Windows x64, Ubuntu x64, macOS Intel và Apple Silicon. Không dùng container hay WSL.
 Các kiểm tra công cụ cũng chạy bằng `uv run --python 3.11 scripts/test_project.py`.
 
@@ -119,11 +125,16 @@ Các kiểm tra công cụ cũng chạy bằng `uv run --python 3.11 scripts/tes
 lượng partition. Các job macOS/Linux được cấu hình trong workflow; cần chạy workflow
 trên GitHub để xác nhận kết quả trên những runner này.
 
-Sau khi job thành công, tải artifact `firmware-<runner>`, giải nén và flash trực tiếp
+Mỗi target có một artifact cùng tên, ví dụ `esp32-c3` chứa `esp32-c3.bin` và bộ file
+flash. Job Ubuntu xuất artifact; các job Windows/macOS kiểm tra native build của
+cùng target. Khi thêm target đã hỗ trợ vào `targets.json`, workflow tự tạo các job
+và artifact riêng cho target đó.
+
+Sau khi job thành công, tải artifact `esp32-c3`, giải nén và flash trực tiếp
 trên máy có USB, không cần bootstrap SDK:
 
 ```sh
-uv run --python 3.11 scripts/project.py flash --build-dir path/to/extracted-firmware --port COM3
+uv run --python 3.11 scripts/project.py flash --target esp32-c3 --build-dir path/to/extracted-firmware --port COM3
 ```
 
 Giữ nguyên cấu trúc `bootloader/`, `partition_table/`, các `.bin` và `flasher_args.json`

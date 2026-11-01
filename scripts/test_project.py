@@ -63,6 +63,18 @@ class JunctionTests(unittest.TestCase):
 
 
 class FlashTests(unittest.TestCase):
+    def test_wrong_target_is_rejected_before_opening_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "flasher_args.json").write_text(json.dumps({
+                "write_flash_args": [], "flash_files": {},
+                "extra_esptool_args": {"chip": "esp32s3"},
+            }))
+            with patch.object(project, "serial_command") as serial:
+                with self.assertRaisesRegex(RuntimeError, "Firmware is for esp32s3"):
+                    project.flash(root, "COM99", 460800, target="esp32-c3")
+                serial.assert_not_called()
+
     def test_flash_uses_manifest_offsets_and_options(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
