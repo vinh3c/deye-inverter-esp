@@ -11,7 +11,7 @@ ESP32-C3 dùng Matter qua Wi-Fi 2.4 GHz, BLE dùng cho commissioning.
 
 ## Native build: Windows, macOS và Linux
 
-Dùng cùng `scripts/project.py` trên cả ba hệ điều hành, không cần Docker hay WSL.
+Dùng cùng lệnh `uv run fw` trên cả ba hệ điều hành, không cần Docker hay WSL.
 Python gọi trực tiếp trình cài toolchain và `idf.py` của ESP-IDF, không phụ thuộc
 `apt`, `install.sh` hoặc thao tác source shell để cài SDK.
 
@@ -34,11 +34,12 @@ flags của SDK này. Bootstrap cần Internet và vài GB dung lượng trống
 Trong thư mục project, chạy giống nhau từ PowerShell, bash hoặc zsh:
 
 ```sh
-uv run --python 3.11 scripts/project.py bootstrap --target esp32-c3
-uv run --python 3.11 scripts/project.py build --target esp32-c3
+uv run fw bootstrap
+uv run fw build
 ```
 
-uv tự chọn/cài Python 3.11, không thay Python hệ thống. SDK được chốt phiên bản
+Không cần activate môi trường Python. uv tự chọn/cài Python theo `.python-version`
+và chuẩn bị CLI từ `pyproject.toml`, không thay Python hệ thống. SDK được chốt phiên bản
 trong `.tools/sdk`; biến môi trường `ESP_SDK_ROOT` cho phép chọn nơi khác.
 Trên Windows có thể đặt `$env:ESP_SDK_ROOT = 'C:\esp\deye-sdk'` để rút ngắn đường dẫn;
 trên macOS/Linux dùng `export ESP_SDK_ROOT="$HOME/esp/deye-sdk"`.
@@ -54,7 +55,7 @@ Build nằm trong `build/<target>/native-<platform>-<architecture>/`, tách riê
 không tái sử dụng CMake cache của WSL hay máy khác. Có thể chọn rõ đường dẫn:
 
 ```sh
-uv run --python 3.11 scripts/project.py build --target esp32-c3 --build-dir build/esp32-c3
+uv run fw build --target esp32-c3 --build-dir build/esp32-c3
 ```
 
 Kết quả có `esp32-c3.bin`, bootloader, partition table và `flasher_args.json`.
@@ -72,7 +73,7 @@ Hiện chỉ có `esp32-c3` được bật; chưa mặc định hỗ trợ các 
 Liệt kê cổng USB rồi chọn đúng cổng của board:
 
 ```sh
-uv run --python 3.11 scripts/project.py ports
+uv run fw ports
 ```
 
 | Hệ điều hành | Ví dụ `--port` |
@@ -85,13 +86,13 @@ Các lệnh dưới đây dùng ví dụ Windows; thay `COM3` bằng cổng vừ
 
 ```sh
 # Build + flash
-uv run --python 3.11 scripts/project.py deploy --port COM3
+uv run fw deploy --port COM3
 # Build + flash + monitor
-uv run --python 3.11 scripts/project.py dev --port COM3
+uv run fw dev --port COM3
 # Flash firmware đã build; không cần cài SDK
-uv run --python 3.11 scripts/project.py flash --port COM3
+uv run fw flash --port COM3
 # Chỉ xem log
-uv run --python 3.11 scripts/project.py monitor --port COM3
+uv run fw monitor --port COM3
 ```
 
 Nếu dùng `--build-dir`, truyền cùng thư mục cho build, menuconfig, deploy và flash.
@@ -104,9 +105,9 @@ Mặc định console là **USB Serial/JTAG**, phù hợp cổng USB native củ
 Nếu board dùng chip USB-UART ngoài (CH340/CP210x), chọn UART0 trong menuconfig:
 
 ```sh
-uv run --python 3.11 scripts/project.py menuconfig
+uv run fw menuconfig
 # Component config -> ESP System Settings -> Channel for console output
-uv run --python 3.11 scripts/project.py build
+uv run fw build
 ```
 
 `sdkconfig` nằm trong thư mục build đã chọn; `sdkconfig.defaults` là cấu hình chung
@@ -119,7 +120,7 @@ wrapper tương thích gọi bộ lệnh Python này.
 Workflow [Native firmware](.github/workflows/build.yml) chạy trên push, pull request
 và workflow_dispatch. Matrix lấy target từ `targets.json`. Mỗi job cài SDK và build trực tiếp trên runner tương ứng:
 Windows x64, Ubuntu x64, macOS Intel và Apple Silicon. Không dùng container hay WSL.
-Các kiểm tra công cụ cũng chạy bằng `uv run --python 3.11 scripts/test_project.py`.
+Các kiểm tra công cụ cũng chạy bằng `uv run fw test`.
 
 Đã xác minh build firmware native trên Windows x64, gồm GN, link và kiểm tra dung
 lượng partition. Các job macOS/Linux được cấu hình trong workflow; cần chạy workflow
@@ -134,7 +135,7 @@ Sau khi job thành công, tải artifact `esp32-c3`, giải nén và flash trự
 trên máy có USB, không cần bootstrap SDK:
 
 ```sh
-uv run --python 3.11 scripts/project.py flash --target esp32-c3 --build-dir path/to/extracted-firmware --port COM3
+uv run fw flash --target esp32-c3 --build-dir path/to/extracted-firmware --port COM3
 ```
 
 Giữ nguyên cấu trúc `bootloader/`, `partition_table/`, các `.bin` và `flasher_args.json`
@@ -200,8 +201,8 @@ Nếu console không dùng được và cần xóa sạch flash, đóng monitor 
 (thay `COM3` bằng cổng của board; lệnh này xóa cả Wi-Fi và fabric):
 
 ```sh
-uv run --python 3.11 scripts/project.py erase-flash --port COM3
-uv run --python 3.11 scripts/project.py flash --port COM3
+uv run fw erase-flash --port COM3
+uv run fw flash --port COM3
 ```
 
 ## Kiểm tra trên board

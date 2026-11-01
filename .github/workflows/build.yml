@@ -22,7 +22,7 @@ jobs:
       - id: targets
         shell: bash
         run: |
-          target_matrix=$(uv run --python 3.11 scripts/project.py targets)
+          target_matrix=$(uv run fw targets)
           echo "targets=$target_matrix" >> "$GITHUB_OUTPUT"
   build:
     needs: targets
@@ -47,11 +47,11 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y git cmake ninja-build flex bison gperf libffi-dev libssl-dev libusb-1.0-0
       - name: Test development tools
-        run: uv run --python 3.11 scripts/test_project.py
+        run: uv run fw test
       - name: Install native SDK
-        run: uv run --python 3.11 scripts/project.py bootstrap --target ${{ matrix.target }}
+        run: uv run fw bootstrap --target ${{ matrix.target }}
       - name: Build firmware
-        run: uv run --python 3.11 scripts/project.py build --target ${{ matrix.target }} --build-dir build/${{ matrix.target }}
+        run: uv run fw build --target ${{ matrix.target }} --build-dir build/${{ matrix.target }}
       - name: Upload flashable firmware
         if: matrix.os == 'ubuntu-24.04'
         uses: actions/upload-artifact@v4

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Compatibility entry point. Windows uses project.py directly.
+# Compatibility entry point; the shared command is uv run fw bootstrap.
 set -euo pipefail
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
-exec uv run --python 3.11 "$project_root/scripts/project.py" bootstrap "$@"
+cd "$project_root"
+exec uv run fw bootstrap "$@"

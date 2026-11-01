@@ -12,6 +12,9 @@ import urllib.request
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
+# uv runs this CLI in the project's venv. IDF must create its SDK venv using
+# the underlying interpreter, rather than nesting it inside the project venv.
+BASE_PYTHON = getattr(sys, "_base_executable", sys.executable)
 TARGETS = json.loads((ROOT / "targets.json").read_text(encoding="utf-8"))
 DEFAULT_TARGET = "esp32-c3"
 IDF_VERSION = "v5.4.1"
@@ -156,7 +159,7 @@ def prepare_environment():
 
 def bootstrap(target=DEFAULT_TARGET):
     if sys.version_info[:2] != (3, 11):
-        raise RuntimeError("Use Python 3.11: uv run --python 3.11 scripts/project.py bootstrap")
+        raise RuntimeError("Use Python 3.11: uv run fw bootstrap")
     for path in (ROOT, SDK):
         if any(c.isspace() for c in str(path)):
             raise RuntimeError(f"This SDK requires paths without whitespace: {path}")
@@ -170,8 +173,8 @@ def bootstrap(target=DEFAULT_TARGET):
     env = base_env()
     checkout(IDF, "https://github.com/espressif/esp-idf.git", IDF_VERSION, env)
     run(["git", "-C", IDF, "submodule", "update", "--init", "--recursive", "--depth", "1", "--jobs", "8"], env=env)
-    run([sys.executable, IDF / "tools/idf_tools.py", "install", "--targets", TARGETS[target]["idf_target"], *sdk_tools], env=env)
-    run([sys.executable, IDF / "tools/idf_tools.py", "install-python-env", "--features", "core"], env=env)
+    run([BASE_PYTHON, IDF / "tools/idf_tools.py", "install", "--targets", TARGETS[target]["idf_target"], *sdk_tools], env=env)
+    run([BASE_PYTHON, IDF / "tools/idf_tools.py", "install-python-env", "--features", "core"], env=env)
     checkout(MATTER, "https://github.com/espressif/esp-matter.git", MATTER_REVISION, env)
     run(["git", "-C", MATTER, "submodule", "update", "--init", "--depth", "1"], env=env)
     run([PYTHON, CHIP / "scripts/checkout_submodules.py", "--platform", "esp32", "--shallow", "--jobs", "8"], cwd=CHIP, env=env)
@@ -181,14 +184,14 @@ def bootstrap(target=DEFAULT_TARGET):
     prepare_environment()
     if WINDOWS:
         windows_compatibility(env)
-    print(f"Native SDK ready. Run: uv run --python 3.11 scripts/project.py build --target {target}")
+    print(f"Native SDK ready. Run: uv run fw build --target {target}")
 
 
 def build_env():
     if not PYTHON.exists() or not (SDK / "gn").exists():
-        raise RuntimeError("SDK missing. Run: uv run --python 3.11 scripts/project.py bootstrap")
+        raise RuntimeError("SDK missing. Run: uv run fw bootstrap")
     env = base_env()
-    exports = run([sys.executable, IDF / "tools/idf_tools.py", "export", "--format", "key-value"], env=env, capture=True)
+    exports = run([BASE_PYTHON, IDF / "tools/idf_tools.py", "export", "--format", "key-value"], env=env, capture=True)
     for line in exports.splitlines():
         key, sep, value = line.partition("=")
         if sep and (key.isidentifier()):
@@ -235,19 +238,21 @@ def flash(build_dir, port, baud, target=DEFAULT_TARGET):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["targets", "bootstrap", "build", "menuconfig", "clean", "ports", "flash", "deploy", "monitor", "dev", "erase-flash"])
+    parser.add_argument("command", choices=["targets", "test", "bootstrap", "build", "menuconfig", "clean", "ports", "flash", "deploy", "monitor", "dev", "erase-flash"])
     parser.add_argument("--target", choices=TARGETS, default=DEFAULT_TARGET)
     parser.add_argument("--build-dir", type=Path)
     parser.add_argument("--port", help="COM3, /dev/cu.usbmodem*, or /dev/ttyACM0")
     parser.add_argument("--baud", type=int, default=460800, help="flash baud rate (monitor uses 115200)")
     args = parser.parse_args()
     if sys.version_info[:2] != (3, 11):
-        parser.error("Use Python 3.11: uv run --python 3.11 scripts/project.py " + args.command)
+        parser.error("Use Python 3.11: uv run fw " + args.command)
     if args.command in ("flash", "deploy", "monitor", "dev", "erase-flash") and not args.port:
         parser.error("--port is required; use the ports command to list devices")
     build_dir = (args.build_dir or (ROOT / "build" / args.target / BUILD.name)).expanduser().resolve()
     if args.command == "targets":
         print(json.dumps(list(TARGETS)))
+    elif args.command == "test":
+        run([sys.executable, ROOT / "scripts/test_project.py"])
     elif args.command == "bootstrap":
         bootstrap(args.target)
     elif args.command == "ports":
@@ -263,7 +268,7 @@ def main():
             serial_command("serial.tools.miniterm", [args.port, "115200"])
 
 
-if __name__ == "__main__":
+def cli():
     try:
         main()
     except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as error:
@@ -271,3 +276,7 @@ if __name__ == "__main__":
         sys.exit(1)
     except KeyboardInterrupt:
         sys.exit(130)
+
+
+if __name__ == "__main__":
+    cli()

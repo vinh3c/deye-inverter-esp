@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 if(NOT DEFINED ENV{ESP_MATTER_PATH})
-    message(FATAL_ERROR "Run uv run --python 3.11 scripts/project.py build (see README.md)")
+    message(FATAL_ERROR "Run uv run fw build (see README.md)")
 endif()
 if(NOT DEFINED IDF_TARGET)
     set(IDF_TARGET esp32c3)
