@@ -1,22 +1,22 @@
 # ESP32-C3 Matter sensors (draft)
 
 Firmware nháp ESP-Matter: một thiết bị Wi-Fi, ba cảm biến nhiệt độ giả lập
-**AC**, **DC**, **Battery**. Mỗi cảm biến là một Temperature Sensor (0x0302), có
+**AC Temperature**, **DC Temperature**, **Battery Temperature**. Mỗi cảm biến là một Temperature Sensor (0x0302), có
 cluster Temperature Measurement (0x0402), NodeLabel và UniqueID riêng. Có thêm
 Contact Sensor **Grid** (0x0015), dùng Boolean State (0x0045).
-Endpoint 0 là Root Node; một aggregator gom bốn sensor con theo mô hình Matter bridge.
+Endpoint 0 là Root Node; một aggregator gom các thiết bị con theo mô hình Matter bridge.
 Switch mẫu đã được bỏ. Không cần cảm biến vật lý, relay hay GPIO ngoài.
 
 | Sensor | Nhiệt độ ban đầu | Khoảng giả lập |
 | --- | --- | --- |
-| AC | 32 °C | 25–55 °C |
-| DC | 36 °C | 30–65 °C |
-| Battery | 28 °C | 20–45 °C |
+| AC Temperature | 32 °C | 25–55 °C |
+| DC Temperature | 36 °C | 30–65 °C |
+| Battery Temperature | 28 °C | 20–45 °C |
 
 Cứ **5 giây**, mỗi giá trị tăng/giảm ngẫu nhiên tối đa 0,50 °C, giới hạn trong
 khoảng trên. Giá trị dùng đơn vị 0,01 °C theo Matter; cập nhật trên Matter thread
-để controller nhận qua subscription. Đây chỉ là dữ liệu mô phỏng; AC/DC/Battery
-đều là nhiệt độ, chưa có đo điện áp, dòng điện hoặc mức pin.
+để controller nhận qua subscription. Đây chỉ là dữ liệu mô phỏng; AC Temperature/DC Temperature/Battery Temperature
+đều là nhiệt độ, chưa có đo điện áp hoặc dòng điện thực.
 
 Grid bắt đầu ở trạng thái **CLOSED**, sau đó chọn ngẫu nhiên OPEN/CLOSED mỗi 5 giây.
 `StateValue=true` là CLOSED, `false` là OPEN theo
@@ -24,7 +24,72 @@ Grid bắt đầu ở trạng thái **CLOSED**, sau đó chọn ngẫu nhiên OP
 Mỗi lần đổi trạng thái, firmware cập nhật attribute và phát event StateChange để
 controller nhận thay đổi. Đây là contact giả lập, chưa đọc tín hiệu điện lưới thực.
 Grid có NodeLabel/UniqueID riêng và được thêm sau ba sensor nhiệt độ để giữ nguyên
-endpoint/định danh AC, DC, Battery.
+endpoint/định danh của các sensor nhiệt độ.
+
+### Điện áp, dòng điện và công suất (bản nháp)
+
+Năm kênh mới dùng Electrical Sensor (0x0510), Power Topology (TreeTopology) và
+cluster **ElectricalPowerMeasurement (0x0090)**. Tên hiển thị theo cùng quy ước
+với Temperature: **PV1 Power**, **PV2 Power**, **Grid Power**, **Battery Power**, **Load Power**.
+
+| Endpoint | Tên | PowerMode | Điện áp giả lập | Dòng điện giả lập |
+| --- | --- | --- | --- | --- |
+| 7 | PV1 Power | DC | 250–450 V | 0–12 A |
+| 8 | PV2 Power | DC | 250–450 V | 0–12 A |
+| 9 | Grid Power | AC | 220–240 V khi Grid CLOSED; 0 V khi OPEN | −10–10 A; 0 A khi OPEN |
+| 10 | Battery Power | DC | 48–56 V | −30–30 A |
+| 11 | Load Power | AC | 220–240 V | 0–20 A |
+
+Đây là cấu hình mô phỏng để thử controller, chưa phải dải điện áp/dòng điện của
+inverter/BMS thực tế. Các kênh cập nhật mỗi 5 giây bằng random walk có giới hạn.
+Grid Power đồng bộ với contact Grid. Quy ước dấu: Grid dương = nhập điện,
+âm = xuất điện; Battery dương = xả, âm = sạc; PV dương = phát điện.
+Load Power mô phỏng tải đầu ra inverter, luôn có dòng không âm; vẫn được cấp
+điện khi Grid OPEN (giả lập inverter dùng PV/pin).
+
+Ưu tiên hai attribute **Voltage** và **ActiveCurrent**; giữ **ActivePower** bắt buộc.
+Đơn vị trên Matter là mV, mA, mW; log đổi sang V/A/W. Công suất giả lập tính
+`P = V × I` (Grid/Load dùng mô hình hệ số công suất 1). Không thêm frequency, RMS,
+reactive/apparent power hay thông số phụ trong bản thử này.
+
+Delegate đọc dữ liệu từ từng kênh; Instance giữ đúng optional mask cho Voltage và
+ActiveCurrent. Firmware kiểm tra đường đọc/encode Matter khi khởi động và đánh
+dấu reporting khi giá trị thay đổi. Khác với việc chỉ ghi số vào log, các giá trị
+này có thể được controller đọc qua cluster. Tham khảo
+[hướng dẫn delegate của Espressif](https://docs.espressif.com/projects/esp-matter/en/latest/esp32/app_guide.html).
+Apple Home có thể chưa hiển thị Electrical Sensor hoặc từng attribute: cần thử
+trên controller hiện tại, không suy ra khả năng UI từ kết quả build/log.
+
+Bridge dùng tree composition: các sensor là endpoint ngang hàng; PartsList của
+mỗi sensor rỗng. Temperature không chứa ElectricalPowerMeasurement/PowerTopology.
+Các kênh điện dùng PowerTopology **TreeTopology** (FeatureMap `0x02`), nên số đo
+chỉ thuộc chính kênh đó. Không dùng NodeTopology vì nó áp dụng số đo cho toàn node,
+kể cả các sensor nhiệt độ không liên quan. Đây là cấu hình riêng với Descriptor
+composition. Bản sửa PartsList trước đó chưa giải quyết được hiện tượng app hiển thị
+tổng Power trong Temperature theo xác nhận của người dùng.
+Firmware kiểm tra cả mã hóa/giải mã PartsList khi boot. Nếu app vẫn gom Power
+vào Temperature sau cập nhật, cần kiểm tra cách controller đọc topology và cache;
+firmware không tự xóa pairing.
+
+Tính năng % pin lưu trữ qua Power Source đã được bỏ khỏi bản hiện tại sau khi
+người dùng thử trên Apple Home/HomeKit và nhận thông báo không hỗ trợ. Endpoint 6
+không còn được tạo; tính năng này hoãn đến tương lai. Battery Temperature vẫn
+chỉ báo nhiệt độ. Không thay % pin bằng một sensor nhiệt độ/độ ẩm giả.
+
+Metadata của bridge và từng thiết bị con:
+
+- Manufacturer/VendorName: `deye-inverter-esp` (tên project).
+- Model/ProductName: tên target, hiện là `esp32-c3`.
+- SerialNumber: `<target>-<MAC>`; sensor con có hậu tố riêng, ví dụ `-AC`, `-DC`, `-Battery`, `-Grid`.
+- Serial của bridge/sensor và UniqueID của sensor ổn định qua reboot/factory reset; endpoint AC Temperature/DC Temperature/Battery Temperature/Grid
+  giữ nguyên 2/3/4/5. VID/PID vẫn là giá trị thử nghiệm đã chốt trong SDK config.
+
+Tên hiển thị thống nhất: AC Temperature, DC Temperature, Battery Temperature,
+Grid, PV1 Power, PV2 Power, Grid Power, Battery Power, Load Power. Key identity/serial của
+sensor cũ vẫn là AC/DC/Battery/Grid; kênh mới dùng PV1Pwr/PV2Pwr/GridPwr/BatPwr/LoadPwr.
+Firmware tự chuyển các NodeLabel mặc định cũ sang tên mới trong NVS, giữ các tên
+tùy chỉnh khác. Controller có thể giữ tên riêng đã đặt trong app; nếu vậy đổi tên
+ngay trong app, không cần factory reset chỉ để đổi nhãn.
 
 SDK được chốt: ESP-IDF **v5.4.1**, Python **3.11**, ESP-Matter release/v1.4 commit
 `abdb759d7aae8a445e3edc5769a10f5cb23feffc`. Board cần flash tối thiểu **4 MB**.
@@ -172,16 +237,20 @@ khi giải nén. Firmware CI chạy trên cùng ESP32-C3 dù được build từ
 3. Chọn thêm thiết bị Matter, nhập manual code hoặc quét QR từ payload trong log.
    Cấu hình thử nghiệm mặc định dùng passcode `20202021`, discriminator `3840`.
    Passcode này dành cho chip-tool; app điện thoại cần manual pairing code/QR.
-4. Chọn Wi-Fi **2.4 GHz**, chờ `PAIR complete; AC, DC, Battery temperatures and Grid contact are ready`.
+4. Chọn Wi-Fi **2.4 GHz**, chờ `PAIR complete; temperature, contact and electrical power sensors are ready`.
    Điện thoại/controller và board cần mạng LAN cho phép IPv6, mDNS/multicast;
    tránh mạng guest cô lập client.
-5. Xem ba sensor nhiệt độ và contact Grid trong app; monitor ghi giá trị giả lập mỗi 5 giây, ví dụ:
+5. Xem các sensor mà controller hỗ trợ; monitor ghi giá trị giả lập mỗi 5 giây, ví dụ:
 
 ```text
-deye_sensors: TEMP AC endpoint=2 value=32.15 C (simulated)
-deye_sensors: TEMP DC endpoint=3 value=35.72 C (simulated)
-deye_sensors: TEMP Battery endpoint=4 value=28.04 C (simulated)
+deye_sensors: TEMP AC Temperature endpoint=2 value=32.15 C (simulated)
+deye_sensors: TEMP DC Temperature endpoint=3 value=35.72 C (simulated)
+deye_sensors: TEMP Battery Temperature endpoint=4 value=28.04 C (simulated)
 deye_sensors: CONTACT Grid endpoint=5 state=CLOSED (simulated)
+deye_sensors: POWER PV1 Power endpoint=7 mode=DC voltage=320.000 V current=5.000 A power=1600.000 W (simulated)
+deye_sensors: POWER PV2 Power endpoint=8 mode=DC voltage=340.000 V current=4.000 A power=1360.000 W (simulated)
+deye_sensors: POWER Grid Power endpoint=9 mode=AC voltage=230.000 V current=3.500 A power=805.000 W (simulated)
+deye_sensors: POWER Battery Power endpoint=10 mode=DC voltage=51.200 V current=-5.000 A power=-256.000 W (simulated)
 ```
 
 Endpoint ID thực tế được in ở log boot. Identify cũng ghi log, không nháy LED.
@@ -202,7 +271,7 @@ Với cấu hình mặc định của repo, manual code là **34970112332**;
   trong log (không nhập passcode 8 chữ số `20202021`).
 - Nếu có cảnh báo phụ kiện chưa được chứng nhận, chấp nhận thiết bị phát triển
   để tiếp tục. Chọn phòng, đặt tên bridge ví dụ **Deye Sensors**.
-- Kiểm tra ba sensor AC, DC, Battery và contact Grid. Cách gom nhóm,
+- Kiểm tra AC Temperature, DC Temperature, Battery Temperature và Grid. Cách gom nhóm,
   hiển thị hoặc cho đổi tên từng sensor tùy controller; đối chiếu với log `TEMP`.
 - iOS 18 trở lên có thể thêm và điều khiển Matter cục bộ mà không cần home hub;
   muốn điều khiển từ xa cần home hub. Xem
@@ -237,15 +306,25 @@ uv run fw flash --port COM3
 
 ## Kiểm tra trên board
 
-Bản bốn sensor đã được build/flash trên ESP32-C3 COM3: log xác nhận AC/DC/Battery
-giữ endpoint 2/3/4, Grid ở endpoint 5 có cả OPEN và CLOSED, cập nhật mỗi 5 giây.
-Pairing được giữ khi flash. Hiển thị Grid trên controller cần xác minh thêm. Checklist:
+Bản sensor đã được build/flash trên ESP32-C3 COM3: ba nhiệt độ ở endpoint 2/3/4,
+Grid ở endpoint 5, cập nhật mỗi 5 giây; manufacturer/model/serial đúng cấu hình.
+Thử nghiệm Power Source trước đây đã chạy được trên firmware nhưng người dùng
+xác nhận Apple Home báo không hỗ trợ, nên endpoint 6 được loại bỏ. Pairing được
+giữ khi flash. Checklist cho bản hiện tại:
 
-- Boot chưa pair: log QR/manual code và bốn endpoint AC, DC, Battery, Grid.
-- Pair: có IP, `PAIR complete`, controller nhận ba temperature sensor và một contact sensor.
-- Mỗi 5 giây: log ba nhiệt độ trong đúng khoảng và trạng thái OPEN/CLOSED của Grid.
+Năm Electrical Sensor ở 7/8/9/10/11 đã build/flash và qua kiểm tra AAI Read/TLV
+encode trên board. Log Voltage/ActiveCurrent/ActivePower đúng đơn vị và P=V×I.
+Descriptor PartsList đã được đọc/giải mã trên board: bridge có 9 con, từng
+sensor có 0 con. Mức hỗ trợ hiển thị trong Apple Home đang chờ người dùng thử.
+
+- Boot chưa pair: log QR/manual code và bốn sensor AC Temperature, DC Temperature, Battery Temperature, Grid.
+- Điện: đọc Voltage/ActiveCurrent/ActivePower của PV1 Power, PV2 Power, Grid Power,
+  Battery Power, Load Power ở 7/8/9/10/11; không có endpoint Power Source 6 sau khi startup hoàn tất.
+- Pair: có IP, `PAIR complete`, controller nhận temperature/contact; không còn endpoint Power Source.
+- Mỗi 5 giây: log ba nhiệt độ và OPEN/CLOSED của Grid.
 - Grid: controller nhận cả trạng thái attribute và StateChange khi tiếp điểm đổi trạng thái.
-- Tên/UniqueID: phân biệt được AC, DC, Battery, Grid; không đổi định danh sau reboot.
+- Tên/UniqueID: phân biệt được AC Temperature, DC Temperature, Battery Temperature, Grid; không đổi định danh sau reboot.
+- Metadata: manufacturer theo tên project, model theo target, serial có MAC và hậu tố riêng.
 - Reboot: controller kết nối lại; giá trị mô phỏng bắt đầu lại từ 32/36/28 °C.
 - Factory reset: pair lại được từ đầu.
 
