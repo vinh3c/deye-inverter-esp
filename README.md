@@ -65,6 +65,8 @@ Battery Power chỉ có W/V/A, không còn cluster Power Source. Battery Tempera
 đo nhiệt độ thật từ register 182 theo °C; endpoint, identity và pairing được giữ nguyên.
 Người dùng báo % pin dường như không hiện khi gắn vào Battery Power và đã yêu cầu
 chuyển sang Battery Temperature. Khả năng hiển thị % trên Apple Home cần thử trên app.
+Đã build và flash COM3 ngày 2026-11-02, xác nhận ba vòng đọc SOC 100% tại endpoint 4
+(Matter raw 200) cùng nhiệt độ thật 38 °C; W/V/A ở endpoint 10 tiếp tục cập nhật.
 
 ### CLI đọc local và log đối chiếu
 

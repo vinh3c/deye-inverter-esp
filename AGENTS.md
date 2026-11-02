@@ -139,6 +139,12 @@ names assigned by users/controllers.
   COM3 flash and config acknowledgement; live SOC=100% read as Matter raw=200 at
   endpoint 10, with null/offline and recovery verified without reboot. Those logs
   do not verify the new endpoint 4 attachment. Logs: ignored .cache/battery-percent-*.log.
+  Endpoint 4 attachment verified on 2026-11-02: native Windows build, COM3 flash
+  with hash verification and config commit/read-back acknowledgement. Three live
+  cycles read SOC=100% as raw=200 at endpoint 4 alongside Battery Temperature=38 C;
+  Battery Power W/V/A continued at endpoint 10. Startup asserts that only Battery
+  Temperature among temperature leaves has Power Source and endpoint 10 has none.
+  Logs: ignored .cache/battery-temp-percent-*.log. App display still needs user confirmation.
 - Endpoint 6 and key `SOC` belong to the retired Power Source experiment. Do not
   reuse them for another sensor type. If restoration is requested, verify actual
   controller support; raw BatPercentRemaining 0..200 represents 0..100%.
