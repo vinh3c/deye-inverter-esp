@@ -64,7 +64,8 @@ EndpointList của Power Source chỉ gồm endpoint 4; endpoint 6 vẫn đượ
 Battery Power chỉ có W/V/A, không còn cluster Power Source. Battery Temperature tiếp tục
 đo nhiệt độ thật từ register 182 theo °C; endpoint, identity và pairing được giữ nguyên.
 Người dùng báo % pin dường như không hiện khi gắn vào Battery Power và đã yêu cầu
-chuyển sang Battery Temperature. Khả năng hiển thị % trên Apple Home cần thử trên app.
+chuyển sang Battery Temperature. Ngày 2026-11-02, người dùng đã xác nhận Apple Home
+hiển thị đúng % pin trong Battery Temperature.
 Đã build và flash COM3 ngày 2026-11-02, xác nhận ba vòng đọc SOC 100% tại endpoint 4
 (Matter raw 200) cùng nhiệt độ thật 38 °C; W/V/A ở endpoint 10 tiếp tục cập nhật.
 

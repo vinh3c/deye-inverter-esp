@@ -133,8 +133,9 @@ names assigned by users/controllers.
   Keep temperature on register 182 in degrees Celsius; never encode SOC as temperature.
   Read failures/out-of-range SOC publish null, Status unavailable, and mark Battery
   Temperature incomplete/unreachable while preserving independent temperature readings.
-  Battery Power reachability depends only on its W/V/A again. Apple Home percentage
-  display on Battery Temperature remains unverified until the user tests the app.
+  Battery Power reachability depends only on its W/V/A again. On 2026-11-02 the
+  user confirmed Apple Home correctly displays percentage on Battery Temperature.
+  Keep this attachment; this confirms this UI behavior, not every Power Source attribute.
   Earlier Battery Power trial: native Windows build, 23 tests (including native C++),
   COM3 flash and config acknowledgement; live SOC=100% read as Matter raw=200 at
   endpoint 10, with null/offline and recovery verified without reboot. Those logs
@@ -144,7 +145,7 @@ names assigned by users/controllers.
   cycles read SOC=100% as raw=200 at endpoint 4 alongside Battery Temperature=38 C;
   Battery Power W/V/A continued at endpoint 10. Startup asserts that only Battery
   Temperature among temperature leaves has Power Source and endpoint 10 has none.
-  Logs: ignored .cache/battery-temp-percent-*.log. App display still needs user confirmation.
+  Logs: ignored .cache/battery-temp-percent-*.log. App display was confirmed by the user.
 - Endpoint 6 and key `SOC` belong to the retired Power Source experiment. Do not
   reuse them for another sensor type. If restoration is requested, verify actual
   controller support; raw BatPercentRemaining 0..200 represents 0..100%.
