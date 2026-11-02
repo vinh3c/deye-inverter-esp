@@ -9,6 +9,8 @@
 #include <esp_matter_console.h>
 #include <nvs_flash.h>
 #include <app/EventLogging.h>
+#include <app/clusters/power-source-server/power-source-server.h>
+#include <app/util/attribute-table.h>
 #include <app/AttributeAccessInterfaceRegistry.h>
 #include <app/AttributeValueEncoder.h>
 #include <app/util/attribute-storage.h>
@@ -22,6 +24,7 @@
 
 namespace {
 constexpr char TAG[] = "deye_sensors";
+namespace ps = chip::app::Clusters::PowerSource;
 
 // Matter TemperatureMeasurement values are signed hundredths of a degree Celsius.
 struct Sensor {
@@ -115,7 +118,10 @@ void configure_bridge_topology()
     for (const auto &sensor : sensors) {
         VerifyOrDie(!esp_matter::cluster::get(sensor.endpoint, chip::app::Clusters::ElectricalPowerMeasurement::Id));
         VerifyOrDie(!esp_matter::cluster::get(sensor.endpoint, chip::app::Clusters::PowerTopology::Id));
+        VerifyOrDie((esp_matter::cluster::get(sensor.endpoint, ps::Id) != nullptr) ==
+                    (sensor.metric == deye::batteryC));
     }
+    VerifyOrDie(!esp_matter::cluster::get(10, ps::Id));
 }
 
 void set_reachable(uint16_t endpoint, bool reachable)
@@ -124,6 +130,29 @@ void set_reachable(uint16_t endpoint, bool reachable)
     auto value = esp_matter_bool(reachable);
     ESP_ERROR_CHECK(esp_matter::attribute::update(endpoint, BridgedDeviceBasicInformation::Id,
         BridgedDeviceBasicInformation::Attributes::Reachable::Id, &value));
+}
+
+void update_battery_percent(const Sensor &sensor, const std::optional<int64_t> &percent)
+{
+    // Matter uses half-percent units: raw 0..200 represents 0..100%.
+    // The shared decoder rejects unavailable/out-of-range register 184.
+    const uint8_t expected = percent ? static_cast<uint8_t>(*percent * 2) : 0xff;
+    auto value = esp_matter_nullable_uint8(percent ? nullable<uint8_t>(expected) : nullable<uint8_t>());
+    ESP_ERROR_CHECK(esp_matter::attribute::update(sensor.endpoint, ps::Id,
+        ps::Attributes::BatPercentRemaining::Id, &value));
+    auto status = esp_matter_enum8(chip::to_underlying(percent ? ps::PowerSourceStatusEnum::kActive :
+                                                              ps::PowerSourceStatusEnum::kUnavailable));
+    ESP_ERROR_CHECK(esp_matter::attribute::update(sensor.endpoint, ps::Id,
+        ps::Attributes::Status::Id, &status));
+    uint8_t actual = 0;
+    VerifyOrDie(emberAfReadAttribute(sensor.endpoint, ps::Id, ps::Attributes::BatPercentRemaining::Id,
+        &actual, sizeof(actual)) == chip::Protocols::InteractionModel::Status::Success && actual == expected);
+    if (percent) {
+        ESP_LOGI(TAG, "BATTERY Battery Temperature endpoint=%u SOC=%lld %% register=184 Matter raw=%u read verified",
+                 sensor.endpoint, static_cast<long long>(*percent), actual);
+    } else {
+        ESP_LOGI(TAG, "BATTERY Battery Temperature endpoint=%u SOC=null (unavailable) read verified", sensor.endpoint);
+    }
 }
 
 void update_sensors(intptr_t context)
@@ -137,7 +166,11 @@ void update_sensors(intptr_t context)
                                esp_matter_nullable_int16(nullable<int16_t>());
         const auto error = esp_matter::attribute::update(sensor.endpoint, TemperatureMeasurement::Id,
             TemperatureMeasurement::Attributes::MeasuredValue::Id, &value);
-        set_reachable(sensor.endpoint, reading.has_value() && error == ESP_OK);
+        const bool battery = sensor.metric == deye::batteryC;
+        const auto percent = battery ? snapshot->get(deye::batteryPercent) : std::nullopt;
+        if (battery) update_battery_percent(sensor, percent);
+        set_reachable(sensor.endpoint, reading.has_value() && error == ESP_OK &&
+                                      (!battery || percent.has_value()));
         if (reading && error == ESP_OK) {
             ESP_LOGI(TAG, "TEMP %s endpoint=%u value=%.2f C register=%u (Modbus)",
                 sensor.name, sensor.endpoint, *reading / 100.0, deye::METRICS[sensor.metric].address);
@@ -237,6 +270,21 @@ void create_sensor(esp_matter::node_t *node, esp_matter::endpoint_t *bridge, Sen
     auto *sensor_endpoint = endpoint::temperature_sensor::create(node, &config, ENDPOINT_FLAG_NONE, nullptr);
     attach_to_bridge(sensor_endpoint, bridge, sensor.name, mac, sensor.identity_key, sensor.identity_key);
     sensor.endpoint = endpoint::get_id(sensor_endpoint);
+    if (sensor.metric == deye::batteryC) {
+        // Battery metadata belongs to this existing temperature leaf;
+        // temperature itself still reports register 182 in degrees Celsius.
+        cluster::power_source::config_t source{};
+        source.status = chip::to_underlying(ps::PowerSourceStatusEnum::kUnavailable);
+        std::strcpy(source.description, "Inverter battery");
+        auto *battery = cluster::power_source::create(sensor_endpoint, &source, CLUSTER_FLAG_SERVER,
+            cluster::power_source::feature::battery::get_id());
+        if (!battery || !cluster::power_source::attribute::create_bat_percent_remaining(
+                battery, nullable<uint8_t>(), nullable<uint8_t>(0), nullable<uint8_t>(200))) {
+            ESP_LOGE(TAG, "Cannot create Battery Temperature percentage");
+            abort();
+        }
+    }
+
     ESP_LOGI(TAG, "TEMP %s endpoint=%u register=%u; awaiting Modbus", sensor.name,
              sensor.endpoint, deye::METRICS[sensor.metric].address);
 }
@@ -352,7 +400,15 @@ extern "C" void app_main()
     device_identity::install_provider(mac);
     electrical_measurements::start(node);
     configure_bridge_topology();
-    for (const auto &sensor : sensors) set_reachable(sensor.endpoint, false);
+    for (const auto &sensor : sensors) {
+        if (sensor.metric == deye::batteryC) {
+            chip::EndpointId supplied[] = {sensor.endpoint};
+            VerifyOrDie(chip::app::Clusters::PowerSourceServer::Instance().SetEndpointList(
+                sensor.endpoint, chip::Span<chip::EndpointId>(supplied)) == CHIP_NO_ERROR);
+        }
+        set_reachable(sensor.endpoint, false);
+        if (sensor.metric == deye::batteryC) update_battery_percent(sensor, std::nullopt);
+    }
     set_reachable(grid.endpoint, false);
     if (chip::Server::GetInstance().GetFabricTable().FabricCount() == 0) {
         PrintOnboardingCodes(chip::RendezvousInformationFlags(chip::RendezvousInformationFlag::kBLE));

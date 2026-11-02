@@ -15,7 +15,7 @@ Tham khảo [Deye Modbus protocol v118](https://www.photovoltaikforum.com/core/a
 | --- | --- | --- | --- |
 | 2 | AC Temperature | 91 | (raw − 1000) / 10 °C |
 | 3 | DC Temperature | 90 | (raw − 1000) / 10 °C |
-| 4 | Battery Temperature | 182 | (raw − 1000) / 10 °C |
+| 4 | Battery Temperature + % pin | Temperature=182, SOC=184 | (raw − 1000) / 10 °C; 1% |
 | 5 | Grid | 150 | Điện áp lưới; CLOSED khi ≥100 V, giữ CLOSED khi ≥80 V |
 | 7 | PV1 Power (DC) | W=186, V=109, A=110 | 1 W; 0,1 V; 0,1 A |
 | 8 | PV2 Power (DC) | W=187, V=111, A=112 | 1 W; 0,1 V; 0,1 A |
@@ -56,9 +56,15 @@ hiển thị trong Temperature; chưa xác định số Power trước đó thu�
 Firmware kiểm tra FeatureMap, PartsList Read/TLV decode và EPM Read/TLV encode
 khi boot, rồi kiểm tra EPM thêm khi có bộ số đo thật đầu tiên.
 
-Power Source/% pin trên Matter vẫn được hoãn theo yêu cầu; không tái dùng endpoint 6.
-CLI có thể đọc SOC từ register 184 (nằm sẵn trong nhóm 178–191) để chẩn đoán,
-nhưng không đưa lại % pin vào Matter hoặc Temperature.
+Battery Temperature có thêm cluster Power Source với `BatPercentRemaining`, lấy SOC thật
+từ register 184 (0–100%, nằm sẵn trong nhóm 178–191, không thêm request).
+Matter mã hóa 0–200 tương ứng 0–100%; lỗi đọc/SOC ngoài khoảng trả `null`,
+Power Source unavailable và Battery Temperature unreachable; nhiệt độ vẫn cập nhật độc lập.
+EndpointList của Power Source chỉ gồm endpoint 4; endpoint 6 vẫn được bỏ trống.
+Battery Power chỉ có W/V/A, không còn cluster Power Source. Battery Temperature tiếp tục
+đo nhiệt độ thật từ register 182 theo °C; endpoint, identity và pairing được giữ nguyên.
+Người dùng báo % pin dường như không hiện khi gắn vào Battery Power và đã yêu cầu
+chuyển sang Battery Temperature. Khả năng hiển thị % trên Apple Home cần thử trên app.
 
 ### CLI đọc local và log đối chiếu
 

@@ -96,7 +96,7 @@ One Root Node, one aggregator/bridge, and these child devices:
 | 1 | Aggregator | Groups child devices |
 | 2 | AC Temperature | Temperature Sensor; register 91 |
 | 3 | DC Temperature | Temperature Sensor; register 90 |
-| 4 | Battery Temperature | Temperature Sensor; register 182 |
+| 4 | Battery Temperature | Temperature Sensor; register 182; Power Source battery percentage (register 184) |
 | 5 | Grid | Contact Sensor; register 150 voltage presence with hysteresis |
 | 7 | PV1 Power | DC Electrical Sensor; Voltage, ActiveCurrent, ActivePower |
 | 8 | PV2 Power | DC Electrical Sensor; Voltage, ActiveCurrent, ActivePower |
@@ -121,10 +121,24 @@ names assigned by users/controllers.
 - Grid uses voltage presence hysteresis: become CLOSED at >=100 V, remain CLOSED
   at >=80 V. true=CLOSED, false=OPEN. Emit StateChange only on a real state change.
   Read errors mark it unreachable and retain its state, never fabricate an outage.
-- **Power Source / battery percentage was removed at the user's request**:
-  the user tested the Battery endpoint in Apple Home/HomeKit and reported it as
-  unsupported (2026-11-01). Defer storage battery monitoring. Do not restore it
-  unprompted, attach percentage to Battery Temperature, or disguise it as temperature/humidity.
+- The standalone Power Source was removed after the user reported it unsupported
+  in Apple Home (2026-11-01). On 2026-11-02 the user requested percentage on
+  Battery Power, with Battery Temperature as fallback. The Battery Power trial
+  passed firmware checks, but the user reported percentage apparently did not
+  display and explicitly requested moving it to Battery Temperature (2026-11-02).
+  Battery Temperature (endpoint 4) now carries a Power Source Battery cluster and
+  nullable BatPercentRemaining from register 184. Remove that cluster from
+  Battery Power (endpoint 10); keep all endpoint IDs and identities stable.
+  There is no separate percentage endpoint. Power Source EndpointList is only {4}.
+  Keep temperature on register 182 in degrees Celsius; never encode SOC as temperature.
+  Read failures/out-of-range SOC publish null, Status unavailable, and mark Battery
+  Temperature incomplete/unreachable while preserving independent temperature readings.
+  Battery Power reachability depends only on its W/V/A again. Apple Home percentage
+  display on Battery Temperature remains unverified until the user tests the app.
+  Earlier Battery Power trial: native Windows build, 23 tests (including native C++),
+  COM3 flash and config acknowledgement; live SOC=100% read as Matter raw=200 at
+  endpoint 10, with null/offline and recovery verified without reboot. Those logs
+  do not verify the new endpoint 4 attachment. Logs: ignored .cache/battery-percent-*.log.
 - Endpoint 6 and key `SOC` belong to the retired Power Source experiment. Do not
   reuse them for another sensor type. If restoration is requested, verify actual
   controller support; raw BatPercentRemaining 0..200 represents 0..100%.
@@ -154,7 +168,7 @@ names assigned by users/controllers.
   NumberOfMeasurementTypes, Accuracy, Voltage, ActiveCurrent, and ActivePower.
 - The public SDK allocates sequential IDs only. Reserve retired slot 6 with a temporary
   aggregator, then remove it under the ChipStack lock immediately after start and before
-  registering the new AAIs. Final runtime state has no endpoint 6/Power Source;
+  registering the new AAIs. Final runtime state has no endpoint 6;
   electrical channels remain at 7..11. Do not reuse SOC or the retired device identity.
 - Passing on-board read/encoding checks does not establish Apple Home EPM support.
   The current goal is to let the user test actual controller support.
@@ -314,8 +328,9 @@ names assigned by users/controllers.
   is unavailable. Zero is valid. Battery power positive=discharge, negative=charge;
   Grid positive=import, negative=export. Grid is internal metering, not external CT.
 - Temperatures: DC 90, AC 91, Battery 182; offset 1000, 0.1 C, raw valid 0..3000.
-  SOC 184 (0..100%) is CLI-only and adds no request to the existing battery block.
-  Keep retired Matter battery-percentage functionality removed.
+  SOC 184 (0..100%) is used by the CLI and Battery Temperature's Power Source cluster;
+  it adds no request to the existing battery block. The standalone retired
+  percentage endpoint 6 remains removed.
 - Firmware network I/O runs in its own task, never under the ChipStack lock or on
   the Matter thread. Publish one owned snapshot via ScheduleWork; wait for its
   completion before starting the next interval, preventing an unbounded work queue.
