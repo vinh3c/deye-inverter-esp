@@ -207,6 +207,7 @@ def idf(action, build_dir, target=DEFAULT_TARGET):
     build_dir.mkdir(parents=True, exist_ok=True)
     run([PYTHON, IDF / "tools/idf.py", "-B", build_dir,
          "-D", f"IDF_TARGET={TARGETS[target]['idf_target']}",
+         "-D", f"FIRMWARE_TARGET={target}",
          "-D", f"SDKCONFIG={(build_dir / 'sdkconfig').as_posix()}",
          "-D", f"Python3_EXECUTABLE={PYTHON.as_posix()}", action], env=build_env())
 
@@ -226,6 +227,9 @@ def flash(build_dir, port, baud, target=DEFAULT_TARGET):
     manifest_chip = data.get("extra_esptool_args", {}).get("chip", chip)
     if manifest_chip != chip:
         raise RuntimeError(f"Firmware is for {manifest_chip}, but --target selects {target}.")
+    app_file = data.get("app", {}).get("file")
+    if app_file is not None and Path(app_file).name != f"{target}.bin":
+        raise RuntimeError(f"Firmware app is {app_file}, but --target selects {target}.")
     args = ["--chip", chip, "--port", port, "--baud", str(baud),
             "--before", "default_reset", "--after", "hard_reset", "write_flash",
             *data["write_flash_args"]]

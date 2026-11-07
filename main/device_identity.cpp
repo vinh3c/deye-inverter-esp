@@ -61,6 +61,11 @@ private:
 
 void serial_number(char *buffer, size_t size, const uint8_t (&mac)[6], const char *key)
 {
+    if (!key) {
+        std::snprintf(buffer, size, "%s-%02X%02X%02X%02X%02X%02X", model,
+                      mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        return;
+    }
     std::snprintf(buffer, size, "%.10s-%02X%02X%02X%02X%02X%02X%s%.7s", model,
                   mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], key ? "-" : "", key ? key : "");
 }

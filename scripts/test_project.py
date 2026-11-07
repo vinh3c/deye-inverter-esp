@@ -144,6 +144,27 @@ class JunctionTests(unittest.TestCase):
 
 
 class FlashTests(unittest.TestCase):
+    def test_same_chip_wrong_board_is_rejected_before_opening_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "flasher_args.json").write_text(json.dumps({
+                "write_flash_args": [], "flash_files": {},
+                "extra_esptool_args": {"chip": "esp32c3"},
+                "app": {"file": "esp32-c3.bin"},
+            }))
+            with patch.object(project, "serial_command") as serial:
+                with self.assertRaisesRegex(RuntimeError, "Firmware app is esp32-c3.bin"):
+                    project.flash(root, "COM99", 460800, target="sonoff-basic-r4")
+                serial.assert_not_called()
+
+    def test_build_passes_board_variant_separately_from_chip(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(project, "build_env", return_value={}), patch.object(project, "run") as run:
+            project.idf("build", Path(directory), "sonoff-basic-r4")
+            args = run.call_args.args[0]
+            self.assertIn("IDF_TARGET=esp32c3", args)
+            self.assertIn("FIRMWARE_TARGET=sonoff-basic-r4", args)
+
     def test_wrong_target_is_rejected_before_opening_device(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

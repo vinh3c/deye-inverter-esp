@@ -172,7 +172,57 @@ Tên firmware theo target, không theo hệ điều hành build. `--target` mặ
 `esp32-c3`. Danh sách target nằm trong [targets.json](targets.json); lệnh `targets`
 in danh sách JSON để GitHub Actions tạo matrix tự động. Khi thêm target mới, cần
 thêm mapping IDF, cấu hình SDK/hardware phù hợp và xác minh firmware cho chip đó.
-Hiện chỉ có `esp32-c3` được bật; chưa mặc định hỗ trợ các chip khác.
+Hai target hiện tại là `esp32-c3` và `sonoff-basic-r4`, cùng dùng chip ESP32-C3.
+
+### Sonoff BASIC R4
+
+Target `sonoff-basic-r4` giữ các sensor Deye và thêm công tắc Matter **Relay** tại
+endpoint **12**, thuộc bridge 1. Endpoint 6 vẫn để trống; các sensor giữ ID/UniqueID.
+Nút vật lý **GPIO9** (active-low, pull-up) đảo relay **GPIO4** (active-high);
+chống dội 40 ms, nhấn ngắn rồi thả để đảo relay một lần. **Giữ đủ 5 giây** mở
+chế độ ghép đôi Matter trong **10 phút**, không đổi relay. Thả sau khi giữ lâu
+không phát thêm thao tác bật/tắt. Nút đang giữ khi boot phải thả ra rồi nhấn lại.
+Điều khiển từ Matter và nút vật lý dùng chung trạng thái OnOff.
+Ghép đôi không xóa Wi-Fi/fabric hiện có: thiết bị chưa pair quảng bá BLE/network;
+thiết bị đã pair mở thêm ghép đôi qua mạng hiện tại. Mã ghép đôi được in ra console
+khi mở cửa sổ mới. Nếu cửa sổ đang mở, giữ nút không hủy hoặc khởi động lại phiên đó.
+Nút hoạt động sau khi khởi động Matter, kể cả khi chưa có Wi-Fi hoặc logger offline.
+Relay mặc định **OFF mỗi lần khởi động**, không khôi phục trạng thái ON cũ.
+
+```sh
+uv run fw build --target sonoff-basic-r4
+uv run fw flash --target sonoff-basic-r4 --port COM5
+uv run fw monitor --target sonoff-basic-r4 --port COM5
+```
+
+Firmware tạo `sonoff-basic-r4.bin` và manifest riêng. Dùng UART0 (115200 baud)
+qua USB–UART trên các pad serial, thay vì console USB Serial/JTAG của target
+`esp32-c3`. Cấu hình riêng ở `sdkconfig.defaults.sonoff-basic-r4`.
+Không dùng chung thư mục build giữa hai target dù cùng chip.
+
+Khi dùng USB–UART trên các pad của BASIC R4, reset tự động sau flash có thể không
+hoạt động. Nếu đã thấy `Hash of data verified` nhưng bước cấu hình logger timeout,
+cấp nguồn lại **không giữ nút**, rồi chạy `uv run fw config --port COM5`.
+Ngắt điện lưới hoàn toàn trong khi kết nối serial.
+
+Firmware giới hạn pool BLE/Wi-Fi và tắt các cluster không dùng để dành RAM cho
+Modbus, console và HTTP trên C3. Nút dùng timer chung; trang HTML được gửi từng
+phần trực tiếp từ flash. Khi cập nhật cấu hình RAM mà vẫn dùng thư mục build cũ,
+cần áp cấu hình mới hoặc dùng một thư mục build riêng, trống cho đúng target/host.
+
+Phạm vi hiện tại là nút bật/tắt relay và giữ 5 giây để ghép đôi Matter;
+chưa triển khai Magic Switch GPIO5, LED GPIO6 hoặc bảo vệ quá nhiệt như firmware stock.
+Không coi bản này là thay thế đầy đủ mọi chức năng/bảo vệ của stock.
+Nguồn chân GPIO: [digiblur BASIC R4](https://digiblur.com/wiki/devices/relays/sonoff-basic-r4/);
+chức năng nút stock: [Sonoff BASICR4 manual](https://support.sonoff.tech/basicr4-usermanual/).
+**Ngắt hoàn toàn điện lưới khi nối USB–UART; chỉ dùng mức 3,3 V.**
+Ngày 2026-11-07 đã build native Windows cho cả hai target và chạy qua 26 bài test,
+gồm C++ chống dội, nhấn ngắn/giữ 5 giây và Modbus. Bản cuối đã flash COM5 với hash
+khớp, qua kiểm tra topology/EPM khi boot, relay mặc định OFF, Modbus worker và HTTP
+server chạy. Đã sửa lỗi thiếu RAM khi khởi động; log 40 giây không thấy reboot,
+RAM trống sau khởi động khoảng 32 KB. Logger được lưu và đọc lại qua USB.
+Board đang chờ commissioning Matter (mã `34970112332`), chưa có Wi-Fi.
+Chưa xác minh nút/tiếp điểm relay, ghép đôi bằng nút và điều khiển Matter trên thiết bị thật.
 
 ## Cấu hình Deye logger qua USB
 
@@ -211,9 +261,32 @@ giữ qua reboot. Thao tác này không xóa hoặc ghi đè Wi-Fi/fabric Matter
 partition layout. Host hỗ trợ IPv4/hostname ASCII dài 1–63 ký tự; port 1–65535.
 Xem cấu hình bằng console `matter esp logger`.
 
-Firmware đọc cấu hình ở đầu mỗi vòng, nên đổi host/port qua USB có hiệu lực
+Firmware đọc cấu hình ở đầu mỗi vòng, nên đổi host/port qua USB hoặc web có hiệu lực
 ở vòng tiếp theo. Profile firmware hiện cố định deye-single, unit ID 1;
 không suy ra register map chỉ từ port 502.
+
+### Form cấu hình trên ESP
+
+Cả `esp32-c3` và `sonoff-basic-r4` có form tại **`http://<IP-của-ESP>/logger`**
+(hoặc trang `/`). Sau khi ESP kết nối Wi-Fi, console in dòng
+`Logger form: http://…/logger`; dùng điện thoại/máy tính trong cùng mạng để mở.
+Wi-Fi vẫn được thiết lập qua commissioning Matter; form không tạo điểm truy cập riêng.
+
+Form hiển thị host/port đang lưu. Nhập địa chỉ logger, cổng rồi bấm **Save configuration**.
+Host là IPv4/hostname ASCII 1–63 ký tự, cổng nguyên 1–65535. Host không gồm
+`http://`, dấu cách hoặc cổng. Trang báo thành công sau khi commit và đọc lại NVS;
+lỗi dữ liệu hoặc lỗi lưu có thông báo. Cấu hình áp dụng ở vòng Modbus tiếp theo,
+không cần reboot và vẫn còn sau mất điện. Console/CLI USB và web dùng chung cấu hình;
+`config.local.json` trên máy tính không tự thay đổi theo form.
+
+Form hoạt động trong LAN qua HTTP, chưa có đăng nhập/HTTPS; người trong mạng có
+thể xem và đổi logger. Form có token chống gửi giả từ trang khác, không dùng CDN
+hay dịch vụ bên ngoài. Chỉ cấu hình kết nối logger, không ghi thanh ghi inverter,
+không xóa Wi-Fi hoặc pairing Matter.
+
+Đã build native Windows cho cả hai target và chạy qua 27 bài test ngày 2026-11-07.
+Đã flash COM5 và thấy HTTP server lắng nghe cổng 80 sau khi sửa RAM. Board chưa
+có Wi-Fi; chưa kiểm chứng trang trên trình duyệt, lưu qua web và cập nhật Modbus thật.
 
 ## Dev, deploy và xem log
 

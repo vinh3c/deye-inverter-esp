@@ -12,12 +12,15 @@ changes. Keep AGENTS.md in English; continue communicating with the user in Viet
   has been replaced; never silently substitute simulated values for failed reads.
 - Communicate concisely in Vietnamese. Report build/flash results and what remains
   unverified. Complete authorized work without asking again about settled decisions.
+- Use English throughout source code, comments, log/error messages and HTML/UI.
+  Vietnamese is the language for conversations with the user, not the product UI.
 - Prefer native Windows, macOS, and Linux workflows. Do not move the main workflow
   to WSL, Docker, `/mnt/c` paths, automatic `apt` installation, or machine-specific scripts.
 - Use short commands such as `uv run fw ...` in documentation and instructions.
   Do not require venv activation or repeatedly use long Python command lines.
 - Do not add hardware, inverter protocols, or targets without a request.
-  Do not restore the sample switch or outlet.
+  Do not restore the sample switch or outlet on the generic target. The requested
+  Sonoff BASIC R4 relay below is a board-specific exception.
 
 ## Code map
 
@@ -28,8 +31,17 @@ changes. Keep AGENTS.md in English; continue communicating with the user in Viet
 - `main/electrical_measurements.h`, `main/electrical_measurements.cpp`: five
   Electrical Sensor channels, delegates/AAI, Matter read checks, and live electrical values.
 - `main/CMakeLists.txt`: application dependencies and target-derived model name.
+- `main/sonoff_relay.cpp`, `.h`, `main/button_debounce.h`: BASIC R4-only GPIO
+  relay, Matter OnOff synchronization and debounced physical button.
+- `scripts/test_sonoff.py`, `scripts/button_core_test.cpp`: native button checks.
 - `main/logger_config.h`, `main/logger_config.cpp`: persisted logger host/port and
-  console commands; read by the Modbus worker each cycle.
+  console commands/shared validated commit-and-read-back API; read by the Modbus worker each cycle.
+- `main/logger_web.cpp`, `.h`, `main/logger_config.html`: embedded LAN HTTP logger form.
+- `main/html_template.h`: allocation-free HTML template streaming, exercised by
+  the native logger form tests.
+- `main/logger_config_validation.h`, `main/logger_form.h`: portable shared validation
+  and bounded URL-encoded form parser; native checks in `scripts/test_logger_web.py`
+  and `scripts/logger_form_core_test.cpp`.
 - `scripts/configure_logger.py`: serial config transfer with commit acknowledgement.
 - `main/inverter_data.cpp`, `.h`, `main/modbus_protocol.h`: network worker, snapshots,
   portable decoding and Modbus framing.
@@ -180,7 +192,92 @@ names assigned by users/controllers.
 - Passing on-board read/encoding checks does not establish Apple Home EPM support.
   The current goal is to let the user test actual controller support.
 
+## Sonoff BASIC R4 target (requested 2026-11-07)
+
+- `sonoff-basic-r4` is a board variant using IDF `esp32c3`; `esp32-c3` stays the
+  default. Build with `uv run fw build --target sonoff-basic-r4`. CMake receives
+  `FIRMWARE_TARGET` separately from `IDF_TARGET`, names the binary/model after the
+  selected board, and rejects reuse of a build directory for another variant.
+- Keep all Deye sensors, endpoint IDs and identity keys. Append a bridged On/Off
+  Plug-in Unit named `Relay` at endpoint 12 only on this target. Slot 6 remains retired.
+  Include endpoint 12 in the bridge/leaf Descriptor checks; no EPM on this relay.
+- BASIC R4 button is GPIO9 active-low with pull-up; relay is GPIO4 active-high.
+  Pin reference: https://digiblur.com/wiki/devices/relays/sonoff-basic-r4/ .
+  Do not confuse BASIC R4 with MINI R4. `main/sonoff_relay.cpp` is compiled only
+  for BASIC R4. Poll/debounce the button for 40 ms, schedule changes onto the Matter
+  thread, and share the OnOff attribute with remote commands. Short release toggles
+  once; holding for 5 seconds opens Matter pairing once without toggling the relay,
+  including on release. A button held during startup must be released before use.
+- Long press opens a 600-second Basic Commissioning Window on the Matter thread.
+  Uncommissioned devices use all supported transports (BLE/network); commissioned
+  devices use DNS-SD on their existing network. Preserve Wi-Fi/fabrics, never reset
+  or erase NVS for this action. Retain an already-open commissioning session and
+  report failures. Print onboarding codes when opening a new window.
+- Drive the relay OFF before Matter/NVS initialization and explicitly publish OFF
+  at startup. Power-on behavior is always OFF, independent of previous state.
+  Relay reachability is independent of Modbus. No inverter writes are added.
+- `sdkconfig.defaults.sonoff-basic-r4` overlays the common defaults: UART0 console
+  on the serial pads (115200), no USB Serial/JTAG console, DIO flash. Keep the
+  generic target's USB console. Use a distinct build directory and flash manifest.
+- The physical BASIC R4 serial pads do not provide the normal dev-board reset
+  wiring. In this session RTS hard reset and ROM soft reset did not reliably start
+  the flashed app. If config acknowledgement times out after verified flash, power
+  cycle with the button released, then use `uv run fw config --port COM5`. Do not
+  confuse post-flash config failure with failure to write the firmware image.
+- Poll the physical button using the shared `ESP_TIMER_TASK` timer service, then
+  ScheduleWork for Matter actions. Avoid a dedicated button task/stack on C3.
+- Scope is short-press local relay, 5-second Matter pairing and Matter OnOff control.
+  GPIO5 Magic Switch, GPIO6 LED and thermal protection are not implemented.
+  Never claim full stock feature/protection parity. Disconnect mains entirely
+  while connecting serial; use 3.3 V UART. Physical relay/button and controller UI
+  behavior remain unverified until tested on actual BASIC R4 hardware.
+- COM5 was observed as CH340 and ESP32-C3 with 4 MB flash.
+  Full flash backup on 2026-11-07 passed esptool digest comparison; it does not
+  establish hardware verification of this new firmware. Do not overwrite stock
+  merely to test a build without authorization for that flash.
+- Verified on 2026-11-07: native Windows builds and native C++ Modbus, debounce,
+  short/long-press and HTML form/streaming checks (27 tests). The Sonoff manifest
+  selects `sonoff-basic-r4.bin`, ESP32-C3, DIO, 4 MB and UART0 console. The user
+  explicitly authorized flashing COM5. Final firmware writes passed hash checks;
+  startup verified the bridge with 10 children, five EPM/TREE checks and relay OFF.
+  Physical button/relay, long-press pairing and controller UI remain unverified.
+- After the RAM fix, COM5 ran multiple unavailable-data cycles with monotonic
+  uptime (11219 -> 30157 ms in one 40-second capture), no abort/reboot, and HTTP
+  port 80 listening. Heap after service startup was 28444 bytes; after main-task
+  cleanup, diagnostics showed 32440 -> 32360 bytes free and largest block 10752.
+  Local logger configuration passed fresh-token commit/read-back and console get.
+  The standard `uv run fw config --target sonoff-basic-r4 --port COM5` command
+  also passed after the app was running. Both final target builds passed on Windows.
+  The board has no commissioned Wi-Fi/fabric yet; real Modbus data and browser
+  access need commissioning. Manual pairing code from this boot: `34970112332`.
+  Logs: ignored `.cache/sonoff-memory-final-{flash,runtime,verify}.log`.
+
 ## Metadata and SDK notes
+
+### C3 RAM budget
+
+- The first Sonoff flash exposed an allocation failure creating the 6144-byte
+  Modbus task after Matter/console startup. A first pool reduction booted with
+  only about 10.9 KB free and a 4096-byte largest block; do not consider that
+  enough headroom for copying/growing a complete HTML page.
+- Keep the common bounded BLE/Wi-Fi pools in `sdkconfig.defaults`: one BLE
+  commissioning connection, peripheral/broadcaster roles, MSYS pools 8/8,
+  transport ACL/event/discard counts 8/12/4, Wi-Fi static RX 6 (BA window 6),
+  dynamic RX/TX 16/16. BLE security, Wi-Fi/BLE coexistence and IPv4/IPv6 remain enabled.
+- Wi-Fi IRAM performance options are disabled to leave RAM for the bridge,
+  Modbus, UART and HTTP. This favors memory over high-throughput Wi-Fi. Do not
+  reduce task stacks to hide allocation failures or disable BLE commissioning.
+- Exclude unused cluster servers using the pinned SDK light example as a base,
+  preserving bridge, temperatures, Boolean State, EPM, TREE, Power Source and relay
+  clusters. Keep startup topology/read checks. Do not restore every optional
+  cluster by default without checking RAM and the required endpoint model.
+- Defaults do not override old values in an existing build's sdkconfig. Apply
+  changes explicitly or use a fresh per-target/host build directory when checking
+  the new budgets. Never patch the SDK or managed components.
+- Log free heap and largest block around service startup. Serve the HTML template
+  directly from embedded flash in chunks with `html_template.h`; do not allocate
+  or grow a whole-page std::string. Native tests cover substitutions, empty chunks
+  and send-failure propagation. Physical commissioning/web use still needs checking.
 
 - Manufacturer/VendorName is the **project name `deye-inverter-esp`**.
 - Model/ProductName follows the **target**, currently `esp32-c3`, supplied by CMake.
@@ -298,7 +395,8 @@ names assigned by users/controllers.
   `uv run fw config --port COM3` applies config only, without rebuilding/flashing.
 - Validate JSON before build/flash. Accept only logger.host (1..63 ASCII hostname/IPv4
   characters) and integer logger.port (1..65535). Reject console injection/extra keys.
-- Transfer through the existing USB Matter console, not by overwriting the NVS
+- Transfer through the existing USB Matter console or the requested LAN web form,
+  not by overwriting the NVS
   partition image. The firmware stores one versioned blob in namespace `deye_logger`,
   commits and reads back before acknowledging a fresh request token. No partition
   changes, pairing deletion, or Wi-Fi/fabric replacement are needed.
@@ -308,6 +406,32 @@ names assigned by users/controllers.
 - Config persistence is separate from the Modbus worker. Firmware polls configured
   host/port with the explicitly selected deye-single map/unit 1; do not infer a
   different register map or protocol merely from port 502.
+
+### Embedded logger web form (requested 2026-11-07)
+
+- Both targets serve GET `/` and GET/POST `/logger` on HTTP port 80 after Matter
+  startup. Wi-Fi still comes from Matter commissioning; no AP, cloud service or
+  new provisioning protocol. Log the station IPv4 URL after server startup/IP changes.
+- The embedded English form loads saved host/port and saves via the same
+  `logger_config::set` API as the USB console. Serialize reads/writes with a FreeRTOS
+  mutex, validate host/port on the device, commit and read back before reporting
+  success. Preserve the blob version/layout, console token acknowledgement, Wi-Fi,
+  fabrics and endpoint identities. The worker picks up changes next cycle.
+- Accept only bounded URL-encoded host/port/token fields (256-byte body maximum).
+  Reject duplicates, extra/missing fields, malformed encoding, NUL/control/non-ASCII
+  input, invalid host/port and bad tokens. Use a random 128-bit per-boot form token,
+  no-store responses and CSP; no CORS or third-party assets. HTTP/NVS work stays on
+  the HTTP task, outside the Matter thread/ChipStack lock.
+- This is a LAN HTTP configuration form without login/TLS. A LAN client can read
+  and change the logger configuration. Do not imply the form token authenticates
+  users. Only local logger connection settings change, never inverter registers.
+- Web changes do not rewrite the PC's `config.local.json`; later USB config/flash
+  application can overwrite settings with that file as before. Keep both paths.
+- Native Windows builds of both targets and the 27-test suite passed on 2026-11-07,
+  including parser/validation checks. Logs: ignored `.cache/logger-web-*.log`.
+  Subsequent COM5 RAM-fix verification confirmed the HTTP listener and shared NVS
+  save/read-back through USB. Browser HTTP requests, web-save persistence and live
+  Modbus adoption through the web remain unverified without commissioned Wi-Fi.
 
 - Verified on 2026-11-01: native Windows build, 15 CLI tests, COM3 flash and
   automatic local config application acknowledged after NVS commit/read-back.

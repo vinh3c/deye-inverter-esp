@@ -1,5 +1,8 @@
 {
   "esp32-c3": {
     "idf_target": "esp32c3"
+  },
+  "sonoff-basic-r4": {
+    "idf_target": "esp32c3"
   }
 }

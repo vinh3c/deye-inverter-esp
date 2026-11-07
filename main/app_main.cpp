@@ -5,6 +5,7 @@
 
 #include <esp_log.h>
 #include <esp_mac.h>
+#include <esp_heap_caps.h>
 #include <esp_matter.h>
 #include <esp_matter_console.h>
 #include <nvs_flash.h>
@@ -21,6 +22,10 @@
 #include "device_identity.h"
 #include "electrical_measurements.h"
 #include "logger_config.h"
+#include "logger_web.h"
+#ifdef DEYE_SONOFF_BASIC_R4
+#include "sonoff_relay.h"
+#endif
 
 namespace {
 constexpr char TAG[] = "deye_sensors";
@@ -105,7 +110,11 @@ void verify_parts_list(chip::EndpointId endpoint, const chip::EndpointId *expect
 
 void configure_bridge_topology()
 {
-    const chip::EndpointId children[] = {2, 3, 4, 5, 7, 8, 9, 10, 11};
+    const chip::EndpointId children[] = {2, 3, 4, 5, 7, 8, 9, 10, 11,
+#ifdef DEYE_SONOFF_BASIC_R4
+        sonoff_relay::endpoint_id,
+#endif
+    };
     // Dynamic endpoints do not receive a composition mode from this SDK.
     // Explicit tree composition makes bridge children siblings and leaves empty.
     VerifyOrDie(chip::app::SetTreeCompositionForEndpoint(1) == CHIP_NO_ERROR);
@@ -331,10 +340,15 @@ void on_event(const chip::DeviceLayer::ChipDeviceEvent *event, intptr_t)
         ESP_LOGI(TAG, "PAIR window open");
         break;
     case DeviceEventType::kCommissioningWindowClosed:
+#ifdef DEYE_SONOFF_BASIC_R4
+        ESP_LOGI(TAG, "PAIR window closed; hold the GPIO9 button for 5 seconds to reopen");
+#else
         ESP_LOGI(TAG, "PAIR window closed; use matter esp factoryreset to start over");
+#endif
         break;
     case DeviceEventType::kInterfaceIpAddressChanged:
         ESP_LOGI(TAG, "NETWORK IP address changed");
+        logger_web::log_address();
         break;
     case DeviceEventType::kFabricRemoved: {
         auto &server = chip::Server::GetInstance();
@@ -361,13 +375,22 @@ void on_event(const chip::DeviceLayer::ChipDeviceEvent *event, intptr_t)
 
 extern "C" void app_main()
 {
+#ifdef DEYE_SONOFF_BASIC_R4
+    sonoff_relay::init();
+#endif
     // Do not silently erase fabrics/Wi-Fi if NVS is incompatible or full.
     ESP_ERROR_CHECK(nvs_flash_init());
     logger_config::init();
 
     esp_matter::node::config_t node_config{};
     std::strcpy(node_config.root_node.basic_information.node_label, device_identity::manufacturer);
-    auto *node = esp_matter::node::create(&node_config, nullptr, on_identify);
+    auto *node = esp_matter::node::create(&node_config,
+#ifdef DEYE_SONOFF_BASIC_R4
+        sonoff_relay::attribute_update,
+#else
+        nullptr,
+#endif
+        on_identify);
     if (!node) {
         ESP_LOGE(TAG, "Cannot create Matter node");
         abort();
@@ -387,6 +410,10 @@ extern "C" void app_main()
     }
     create_grid_sensor(node, bridge, mac);
     electrical_measurements::create(node, bridge, mac, attach_to_bridge);
+#ifdef DEYE_SONOFF_BASIC_R4
+    char relay_name[] = "Relay";
+    attach_to_bridge(sonoff_relay::create(node), bridge, relay_name, mac, "Relay");
+#endif
     auto *basic = esp_matter::cluster::get(static_cast<uint16_t>(0), chip::app::Clusters::BasicInformation::Id);
     char serial[33];
     device_identity::serial_number(serial, sizeof(serial), mac);
@@ -400,6 +427,10 @@ extern "C" void app_main()
     device_identity::install_provider(mac);
     electrical_measurements::start(node);
     configure_bridge_topology();
+#ifdef DEYE_SONOFF_BASIC_R4
+    sonoff_relay::start();
+    set_reachable(sonoff_relay::endpoint_id, true);
+#endif
     for (const auto &sensor : sensors) {
         if (sensor.metric == deye::batteryC) {
             chip::EndpointId supplied[] = {sensor.endpoint};
@@ -422,6 +453,13 @@ extern "C" void app_main()
     ESP_ERROR_CHECK(esp_matter::console::init());
 #endif
 
+    ESP_LOGI(TAG, "MEMORY before services: free=%u largest=%u bytes",
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
     inverter_data::start(update_sensors);
+    logger_web::start();
+    ESP_LOGI(TAG, "MEMORY after services: free=%u largest=%u bytes",
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
     ESP_LOGI(TAG, "Modbus polling: deye-single unit=1, 6 sequential FC03 groups; 5 seconds after each cycle");
 }

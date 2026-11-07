@@ -1,4 +1,5 @@
 #include "logger_config.h"
+#include "logger_config_validation.h"
 
 #include <cctype>
 #include <cstdio>
@@ -8,24 +9,20 @@
 #include <esp_log.h>
 #include <esp_matter_console.h>
 #include <nvs.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 namespace logger_config {
 namespace {
 constexpr char TAG[] = "logger_config";
 constexpr char NAMESPACE[] = "deye_logger";
+SemaphoreHandle_t settings_mutex = nullptr;
 
-bool valid_host(const char *host)
-{
-    const size_t length = std::strlen(host);
-    if (!length || length > 63 || !std::isalnum(static_cast<unsigned char>(host[0])) ||
-        !std::isalnum(static_cast<unsigned char>(host[length - 1]))) return false;
-    for (size_t i = 0; i < length; ++i) {
-        const unsigned char c = host[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-              (c >= '0' && c <= '9') || c == '-' || c == '.')) return false;
-    }
-    return true;
-}
+class SettingsLock {
+public:
+    SettingsLock() { configASSERT(settings_mutex); xSemaphoreTake(settings_mutex, portMAX_DELAY); }
+    ~SettingsLock() { xSemaphoreGive(settings_mutex); }
+};
 
 esp_err_t load(Settings &settings)
 {
@@ -46,7 +43,7 @@ esp_err_t command(int argc, char **argv)
 {
     if (argc == 0) {
         Settings settings{};
-        const auto error = load(settings);
+        const auto error = get(settings);
         if (error == ESP_OK) {
             std::printf("LOGGER_CONFIG host=%s port=%u unit=1 profile=deye-single\n", settings.host, settings.port);
         } else {
@@ -58,15 +55,31 @@ esp_err_t command(int argc, char **argv)
     // from old log output or the shell's echoed input.
     if (argc != 4 || std::strcmp(argv[0], "set") || !valid_host(argv[1]) || std::strlen(argv[3]) != 8)
         return ESP_ERR_INVALID_ARG;
-    for (const char *c = argv[2]; *c; ++c) if (*c < '0' || *c > '9') return ESP_ERR_INVALID_ARG;
     for (const char *c = argv[3]; *c; ++c) if (!std::isxdigit(static_cast<unsigned char>(*c))) return ESP_ERR_INVALID_ARG;
-    char *end;
-    const auto port = std::strtoul(argv[2], &end, 10);
-    if (!*argv[2] || *end || port == 0 || port > 65535) return ESP_ERR_INVALID_ARG;
+    uint16_t port;
+    if (!parse_port(argv[2], port)) return ESP_ERR_INVALID_ARG;
+    const auto error = set(argv[1], port);
+    if (error != ESP_OK) return error;
+    std::printf("LOGGER_CONFIG_SAVED token=%s host=%s port=%u\n", argv[3], argv[1], port);
+    std::fflush(stdout);
+    return ESP_OK;
+}
+} // namespace
+
+esp_err_t get(Settings &settings)
+{
+    SettingsLock lock;
+    return load(settings);
+}
+
+esp_err_t set(const char *host, uint16_t port)
+{
+    if (!host || !valid_host(host) || !port) return ESP_ERR_INVALID_ARG;
+    SettingsLock lock;
     Settings settings{};
     settings.version = 1;
-    std::strcpy(settings.host, argv[1]);
-    settings.port = static_cast<uint16_t>(port);
+    std::strcpy(settings.host, host);
+    settings.port = port;
     nvs_handle_t handle;
     auto error = nvs_open(NAMESPACE, NVS_READWRITE, &handle);
     if (error != ESP_OK) return error;
@@ -78,16 +91,13 @@ esp_err_t command(int argc, char **argv)
     error = load(stored);
     if (error != ESP_OK) return error;
     if (std::strcmp(stored.host, settings.host) || stored.port != settings.port) return ESP_FAIL;
-    std::printf("LOGGER_CONFIG_SAVED token=%s host=%s port=%u\n", argv[3], stored.host, stored.port);
-    std::fflush(stdout);
     return ESP_OK;
 }
-} // namespace
-
-esp_err_t get(Settings &settings) { return load(settings); }
 
 void init()
 {
+    settings_mutex = xSemaphoreCreateMutex();
+    ESP_ERROR_CHECK(settings_mutex ? ESP_OK : ESP_ERR_NO_MEM);
     Settings settings{};
     const auto error = load(settings);
     if (error == ESP_OK) {
